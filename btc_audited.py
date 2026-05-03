@@ -29,7 +29,10 @@ import requests
 import sys
 import subprocess
 import io
+import threading
+import os
 from datetime import datetime
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # ── Windows UTF-8 fix ─────────────────────────────────────────
 # Ensures box-drawing chars and emoji render on all Windows terminals
@@ -941,10 +944,36 @@ def send_tg(sig):
         print(s(f"  Telegram: {e}", GY))
 
 # ═══════════════════════════════════════════════════════════════
+#  KEEPALIVE WEB SERVER (Render/UptimeRobot anti-sleep trick)
+#  Runs a tiny HTTP server in a background thread so Render treats
+#  this as a "web service" and UptimeRobot can ping it every 5 min
+#  to prevent Render from putting the bot to sleep.
+# ═══════════════════════════════════════════════════════════════
+
+class _PingHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"BTC Signal Intelligence v2.0 - Running OK")
+    def log_message(self, fmt, *args):  # Silence noisy access logs
+        pass
+
+def _start_keepalive_server():
+    port = int(os.getenv("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), _PingHandler)
+    print(s(f"  Keepalive server listening on port {port} (Render/UptimeRobot)", GY))
+    server.serve_forever()
+
+# ═══════════════════════════════════════════════════════════════
 #  MAIN LOOP
 # ═══════════════════════════════════════════════════════════════
 
 def main():
+    # Start keepalive server in background thread (for Render/UptimeRobot)
+    t = threading.Thread(target=_start_keepalive_server, daemon=True)
+    t.start()
+
     print_header()
     print(s(f"  Connecting to {EXCHANGE.upper()}...", GY), end="", flush=True)
     ex = connect()

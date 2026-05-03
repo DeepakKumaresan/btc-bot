@@ -1,1 +1,1 @@
-worker: python btc_audited.py
+web: python btc_audited.py
