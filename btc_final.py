@@ -25,7 +25,6 @@
 ╚═══════════════════════════════════════════════════════════════╝
 """
 
-import os
 import ccxt
 import pandas as pd
 import numpy as np
@@ -53,24 +52,24 @@ TF_4H         = "4h"
 LIMIT         = 300
 
 # Signal thresholds — calibrated from real BTC behaviour
-RSI_OVERBOUGHT    = 62    # short zone starts here
-RSI_OVERSOLD      = 38    # long zone starts here
-RSI_EXTREME_OB    = 72    # strong overbought
-RSI_EXTREME_OS    = 28    # strong oversold
+RSI_OVERBOUGHT    = 60    # short zone starts here
+RSI_OVERSOLD      = 40    # long zone starts here
+RSI_EXTREME_OB    = 68    # strong overbought
+RSI_EXTREME_OS    = 32    # strong oversold
 ADX_TRENDING      = 18    # market is trending above this
 VOL_NORMAL_MAX    = 3.0   # volume above 3x average = whale/news, SKIP
-VOL_CONFIRM       = 1.2   # minimum volume to confirm signal
+VOL_CONFIRM       = 1.0   # minimum volume to confirm signal
 MIN_ATR_RATIO     = 0.6   # signal needs real volatility
 
 # Risk
-SL_ATR_MULT   = 1.3
-TP_ATR_MULT   = 2.8
-MIN_RR        = 1.9
-SIGNAL_GAP    = 5         # candles between signals
+SL_ATR_MULT   = 1.2
+TP_ATR_MULT   = 2.6
+MIN_RR        = 1.8
+SIGNAL_GAP    = 4         # candles between signals
 
-# Telegram — env var takes priority (Railway), falls back to hardcoded for local run
-TG_TOKEN      = os.environ.get("TELEGRAM_TOKEN", "8775276870:AAGABvQ6PwtRgGPNbk3V4YX_A0eVXxpiWyo")
-TG_CHAT       = os.environ.get("TELEGRAM_CHAT",  "998659643")
+# Telegram (optional)
+TG_TOKEN      = ""
+TG_CHAT       = ""
 
 # ═══════════════════════════════════════════════════════════════
 #  CLEAN TERMINAL COLORS — no blinking, no choppy garbage
@@ -177,8 +176,8 @@ def build_indicators(df):
 
     # Stochastic RSI
     sr = ta.momentum.StochRSIIndicator(c, 14, 3, 3)
-    df["stk"]    = sr.stochrsi_k() * 100
-    df["stochd"] = sr.stochrsi_d() * 100
+    df["stk"] = sr.stochrsi_k() * 100
+    df["std"] = sr.stochrsi_d() * 100
 
     # ADX — trend strength
     adx = ta.trend.ADXIndicator(h, l, c, 14)
@@ -317,86 +316,116 @@ def confidence_score(checks, regime_conf, rr):
 # ═══════════════════════════════════════════════════════════════
 
 def mode_trend(df15, df1h, regime):
-    """Classic trend-following. Only in TRENDING regime."""
+    """
+    Trend-following with two sub-modes:
+    - PULLBACK: in uptrend, buy dips to EMA9/20 (RSI 45-65 range is fine)
+    - BREAKOUT: price crosses above/below key EMA with volume
+    """
     if regime["type"] not in ("TRENDING_UP", "TRENDING_DOWN"):
-        return None
-    r, p = df15.iloc[-1], df15.iloc[-2]
-    r1h  = df1h.iloc[-1]
-    price = r.close
-    atr   = r.atr
-
-    # LONG checks (needs 6/8)
-    # FIX: RSI < 38 is wrong in uptrend — price > EMA200 proves trend, RSI
-    #      should be in pullback zone (40-58) and CURLING UP (not still falling)
-    # FIX: r.is_bull (green candle) is weak; replaced with EMA200 alignment.
-    lc = [
-        price > r.ema200,                               # above long-term trend line
-        price > r.ema50,                                # above medium-term MA
-        r.ema9 > r.ema20,                               # short MAs bullish
-        r.rsi < 58 and r.rsi > r.rsi_prev,             # pullback zone + RSI hooking UP
-        (p.macd < p.macds) and (r.macd > r.macds),     # fresh MACD bull cross
-        r.volume > r.vol_ma * VOL_CONFIRM,              # volume confirms move
-        r.adxp > r.adxn,                               # +DI dominant (bull pressure)
-        r1h.close > r1h.ema50,                         # 1H timeframe agrees
-    ]
-    # SHORT checks (needs 6/8)
-    # FIX: RSI > 62 is wrong in downtrend — bounce zone should be 42-60,
-    #      RSI must be ROLLING OVER (< rsi_prev), not still rising.
-    sc = [
-        price < r.ema200,                               # below long-term trend line
-        price < r.ema50,                                # below medium-term MA
-        r.ema9 < r.ema20,                               # short MAs bearish
-        r.rsi > 42 and r.rsi < r.rsi_prev,             # bounce zone + RSI rolling OVER
-        (p.macd > p.macds) and (r.macd < r.macds),     # fresh MACD bear cross
-        r.volume > r.vol_ma * VOL_CONFIRM,              # volume confirms move
-        r.adxn > r.adxp,                               # -DI dominant (bear pressure)
-        r1h.close < r1h.ema50,                         # 1H timeframe agrees
-    ]
-    ls, ss = sum(lc), sum(sc)
-    if ls >= 6 and regime["type"] == "TRENDING_UP":     # raised 5→6 (stricter)
-        return _signal("LONG", "TREND", price, atr, lc, regime)
-    if ss >= 6 and regime["type"] == "TRENDING_DOWN":   # raised 5→6 (stricter)
-        return _signal("SHORT", "TREND", price, atr, sc, regime)
-    return None
-
-def mode_rejection(df15, df1h, regime):
-    """
-    Wick rejection — catches fakeouts and liquidation wicks.
-    Works in ALL tradeable regimes.
-    FIX: Added df1h HTF alignment check to avoid counter-trend rejection
-         traps in strongly trending markets.
-    """
-    if not regime["tradeable"]:
         return None
     r, p  = df15.iloc[-1], df15.iloc[-2]
     r1h   = df1h.iloc[-1]
     price = r.close
     atr   = r.atr
 
-    # SHORT: long upper wick = sellers violently rejecting price
+    if regime["type"] == "TRENDING_UP":
+        # LONG PULLBACK: price dips to EMA9 or EMA20 in uptrend, then bounces
+        # RSI between 40-65 is fine — we are in an uptrend, not waiting for oversold
+        pullback_lc = [
+            price > r.ema200,                          # above long trend
+            price > r.ema50,                           # above mid trend
+            r.ema9 > r.ema20,                          # short trend up
+            40 < r.rsi < 68,                           # healthy RSI in uptrend
+            r.macdh > r.macdh_prev,                    # MACD histogram rising
+            r.volume > r.vol_ma * VOL_CONFIRM,         # volume ok
+            r.adxp > r.adxn,                           # +DI dominant
+            r.is_bull == 1,                            # green candle
+            r1h.close > r1h.ema50,                     # 1H confirms up
+        ]
+        # LONG BREAKOUT: price just crossed above EMA20 with strong volume
+        breakout_lc = [
+            price > r.ema200,
+            p.close < p.ema20 and price > r.ema20,     # fresh cross above EMA20
+            r.volume > r.vol_ma * 1.5,                 # strong volume
+            r.rsi > 45,
+            r.macd > r.macds,
+            r.adx > ADX_TRENDING,
+            r.is_bull == 1,
+            r1h.close > r1h.ema50,
+        ]
+        pb = sum(pullback_lc)
+        bk = sum(breakout_lc)
+        if pb >= 6:
+            return _signal("LONG", "TREND PULLBACK", price, atr, pullback_lc, regime)
+        if bk >= 5:
+            return _signal("LONG", "TREND BREAKOUT", price, atr, breakout_lc, regime)
+
+    if regime["type"] == "TRENDING_DOWN":
+        # SHORT PULLBACK: price bounces up in downtrend, then resumes down
+        pullback_sc = [
+            price < r.ema200,
+            price < r.ema50,
+            r.ema9 < r.ema20,
+            32 < r.rsi < 60,
+            r.macdh < r.macdh_prev,
+            r.volume > r.vol_ma * VOL_CONFIRM,
+            r.adxn > r.adxp,
+            r.is_bull == 0,
+            r1h.close < r1h.ema50,
+        ]
+        # SHORT BREAKOUT: price breaks below EMA20
+        breakout_sc = [
+            price < r.ema200,
+            p.close > p.ema20 and price < r.ema20,
+            r.volume > r.vol_ma * 1.5,
+            r.rsi < 55,
+            r.macd < r.macds,
+            r.adx > ADX_TRENDING,
+            r.is_bull == 0,
+            r1h.close < r1h.ema50,
+        ]
+        pb = sum(pullback_sc)
+        bk = sum(breakout_sc)
+        if pb >= 6:
+            return _signal("SHORT", "TREND PULLBACK", price, atr, pullback_sc, regime)
+        if bk >= 5:
+            return _signal("SHORT", "TREND BREAKOUT", price, atr, breakout_sc, regime)
+
+    return None
+
+def mode_rejection(df15, regime):
+    """
+    Wick rejection — catches the 79176-type drops.
+    Works in ALL tradeable regimes.
+    """
+    if not regime["tradeable"]:
+        return None
+    r, p = df15.iloc[-1], df15.iloc[-2]
+    price = r.close
+    atr   = r.atr
+
+    # SHORT: long upper wick = sellers rejecting price
     sc = [
-        r.hi_wick > r.body * 2.0,       # wick at least 2x the body
-        r.hi_wick > atr * 0.6,           # wick has real size (not tiny noise)
-        r.volume > r.vol_ma * VOL_CONFIRM,# backed by volume
-        r.is_bull == 0,                  # candle closed bearish
-        r.rsi > 52,                      # RSI not in oversold (avoid false short)
-        price < r.ema9,                  # price rejected back below fast EMA
-        r1h.close < r1h.ema20,          # HTF: 1H is also bearish (NEW)
+        r.hi_wick > r.body * 2.0,
+        r.hi_wick > atr * 0.6,
+        r.volume > r.vol_ma * VOL_CONFIRM,
+        r.is_bull == 0,
+        r.rsi > 52,
+        price < r.ema9,
     ]
-    # LONG: long lower wick = buyers aggressively defending price
+    # LONG: long lower wick = buyers rejecting dip
     lc = [
-        r.lo_wick > r.body * 2.0,       # wick at least 2x the body
-        r.lo_wick > atr * 0.6,           # wick has real size
-        r.volume > r.vol_ma * VOL_CONFIRM,# backed by volume
-        r.is_bull == 1,                  # candle closed bullish
-        r.rsi < 48,                      # RSI not overbought (avoid false long)
-        price > r.ema9,                  # price recovered above fast EMA
-        r1h.close > r1h.ema20,          # HTF: 1H is also bullish (NEW)
+        r.lo_wick > r.body * 2.0,
+        r.lo_wick > atr * 0.6,
+        r.volume > r.vol_ma * VOL_CONFIRM,
+        r.is_bull == 1,
+        r.rsi < 55,
+        price > r.ema9,
     ]
     ss, ls = sum(sc), sum(lc)
-    if ss >= 5:                          # threshold 4→5 (7 checks now)
+    if ss >= 4:
         return _signal("SHORT", "REJECTION", price, atr, sc, regime)
-    if ls >= 5:                          # threshold 4→5 (7 checks now)
+    if ls >= 4:
         return _signal("LONG",  "REJECTION", price, atr, lc, regime)
     return None
 
@@ -416,7 +445,7 @@ def mode_reversal(df15, df1h, regime):
     lc = [
         r.rsi < RSI_EXTREME_OS,
         r.rsi > r.rsi_prev,
-        r.stk < 25 and r.stk > r.stochd,
+        r.stk < 25 and r.stk > r.std,
         r.macdh > r.macdh_prev,
         r.lo_wick > r.body,
         r1h.rsi < 45,
@@ -425,7 +454,7 @@ def mode_reversal(df15, df1h, regime):
     sc = [
         r.rsi > RSI_EXTREME_OB,
         r.rsi < r.rsi_prev,
-        r.stk > 75 and r.stk < r.stochd,
+        r.stk > 75 and r.stk < r.std,
         r.macdh < r.macdh_prev,
         r.hi_wick > r.body,
         r1h.rsi > 55,
@@ -439,63 +468,33 @@ def mode_reversal(df15, df1h, regime):
 
 def mode_divergence(df15, regime):
     """
-    RSI divergence — price makes new high/low but RSI makes opposite move.
-    COMPLETELY REWRITTEN: Old version compared only 3 candles (45 min) which
-    is market noise, not real divergence. Real divergence forms between true
-    swing highs/lows separated by 10-25 candles. Also added a 3-point RSI
-    buffer so tiny wiggles don't trigger the signal.
+    RSI divergence — price makes new high/low but RSI doesn't.
+    This is one of the most reliable signals in technical analysis.
     """
     if not regime["tradeable"]:
         return None
-    if len(df15) < 35:
-        return None   # not enough history
+    df   = df15.tail(6)
+    r    = df.iloc[-1]
+    price= r.close
+    atr  = r.atr
 
-    r     = df15.iloc[-1]
-    price = r.close
-    atr   = r.atr
+    # Bearish divergence: price higher high, RSI lower high
+    ph   = df["high"].iloc[-3]
+    prsi = df["rsi"].iloc[-3]
+    bear_div = (r.high > ph) and (r.rsi < prsi) and (r.rsi > 45)
 
-    # Search window: candles -25 to -5 (20-candle window, skip last 5 for settling)
-    # This ensures we're comparing to a REAL prior swing, not recent noise.
-    lookback = df15.iloc[-26:-5]
-
-    # ── BEARISH DIVERGENCE ──────────────────────────────────────────────
-    # Price: current high > prior swing HIGH  (price making higher high)
-    # RSI:   current rsi  < prior swing RSI   (momentum weakening = divergence)
-    sh_idx    = lookback["high"].idxmax()         # index of prior swing high
-    sh_price  = lookback.loc[sh_idx, "high"]
-    sh_rsi    = lookback.loc[sh_idx, "rsi"]
-    # Require RSI gap of at least 3 points to avoid noise triggers
-    bear_div  = (r.high > sh_price) and (r.rsi < sh_rsi - 3) and (r.rsi > 45)
-
-    # ── BULLISH DIVERGENCE ──────────────────────────────────────────────
-    # Price: current low < prior swing LOW    (price making lower low)
-    # RSI:   current rsi > prior swing RSI    (momentum strengthening = divergence)
-    sl_idx    = lookback["low"].idxmin()          # index of prior swing low
-    sl_price  = lookback.loc[sl_idx, "low"]
-    sl_rsi    = lookback.loc[sl_idx, "rsi"]
-    bull_div  = (r.low < sl_price) and (r.rsi > sl_rsi + 3) and (r.rsi < 55)
+    # Bullish divergence: price lower low, RSI higher low
+    pl   = df["low"].iloc[-3]
+    plrsi= df["rsi"].iloc[-3]
+    bull_div = (r.low < pl) and (r.rsi > plrsi) and (r.rsi < 55)
 
     vol_ok = r.volume > r.vol_ma * VOL_CONFIRM
 
     if bear_div and vol_ok:
-        checks = [
-            bear_div,               # divergence confirmed
-            vol_ok,                 # volume present
-            r.rsi > 50,             # RSI still in upper half
-            r.is_bull == 0,         # current candle bearish
-            r.adx > 15,             # some trend strength
-            sh_rsi > 50,            # prior swing RSI was also elevated
-        ]
+        checks = [bear_div, vol_ok, r.rsi > 50, r.is_bull == 0, r.adx > 15, True]
         return _signal("SHORT", "DIVERGENCE", price, atr, checks, regime)
     if bull_div and vol_ok:
-        checks = [
-            bull_div,               # divergence confirmed
-            vol_ok,                 # volume present
-            r.rsi < 50,             # RSI still in lower half
-            r.is_bull == 1,         # current candle bullish
-            r.adx > 15,             # some trend strength
-            sl_rsi < 50,            # prior swing RSI was also depressed
-        ]
+        checks = [bull_div, vol_ok, r.rsi < 50, r.is_bull == 1, r.adx > 15, True]
         return _signal("LONG",  "DIVERGENCE", price, atr, checks, regime)
     return None
 
@@ -575,7 +574,7 @@ def _signal(direction, mode, price, atr, checks, regime):
 def run_all_modes(df15, df1h, df4h, regime):
     """Run all 5 modes, return first valid signal found."""
     for fn in [
-        lambda: mode_rejection(df15, df1h, regime),   # now receives df1h
+        lambda: mode_rejection(df15, regime),
         lambda: mode_structure(df15, df1h, regime),
         lambda: mode_divergence(df15, regime),
         lambda: mode_trend(df15, df1h, regime),
@@ -689,6 +688,37 @@ def print_status(df15, df1h, df4h, regime):
             print(g(f"  ●  {regime['reason']}", GRAY))
         print()
 
+def print_why_no_signal(df15, df1h, df4h, regime):
+    """Shows exactly which filters are close to firing — printed every 5 minutes."""
+    r, p = df15.iloc[-1], df15.iloc[-2]
+    r1h  = df1h.iloc[-1]
+    price = r.close
+    if not regime["tradeable"]:
+        return
+    checks = {
+        "EMA trend  ": price > r.ema50 if "UP" in regime["type"] else price < r.ema50,
+        "EMA align  ": r.ema9 > r.ema20 if "UP" in regime["type"] else r.ema9 < r.ema20,
+        "RSI zone   ": 40 < r.rsi < 68 if "UP" in regime["type"] else 32 < r.rsi < 60,
+        "MACD hist  ": r.macdh > r.macdh_prev if "UP" in regime["type"] else r.macdh < r.macdh_prev,
+        "Volume     ": r.volume > r.vol_ma * VOL_CONFIRM,
+        "ADX dir    ": r.adxp > r.adxn if "UP" in regime["type"] else r.adxn > r.adxp,
+        "Candle     ": r.is_bull == 1 if "UP" in regime["type"] else r.is_bull == 0,
+        "1H confirm ": r1h.close > r1h.ema50 if "UP" in regime["type"] else r1h.close < r1h.ema50,
+    }
+    passed = sum(checks.values())
+    needed = 6
+    print()
+    print(g(f"  ─── Signal Tracker: {passed}/{needed} needed ─────────────────────────", GRAY))
+    for name, ok in checks.items():
+        icon = g("  ✓", BGREEN) if ok else g("  ✗", BRED)
+        print(icon + g(f" {name}", GRAY))
+    if passed >= needed:
+        print(g(f"  → All {needed} passed — signal should fire next candle", BGREEN))
+    else:
+        print(g(f"  → Need {needed - passed} more filter(s) to fire a signal", YELLOW))
+    print(g("  " + "─" * (W-2), GRAY))
+    print()
+
 def print_signal(sig):
     d    = sig["direction"]
     lng  = d == "LONG"
@@ -743,9 +773,9 @@ def print_signal(sig):
     print(g("  │", gc) + rr_line + " " * max(0, W-4-rr_raw) + g("│", gc))
 
     # ATR info
-    stop_dist = abs(sig['entry'] - sig['sl'])
-    atr_line = f"  ATR  {g(str(sig['atr']), CYAN)}   Stop distance: {g(f'${stop_dist:,.1f}', GRAY)}"
-    atr_raw  = len(f"  ATR  {sig['atr']}   Stop distance: ${stop_dist:,.1f}")
+    sl_dist = abs(sig["entry"] - sig["sl"])
+    atr_line = f"  ATR  {g(str(sig['atr']), CYAN)}   Stop distance: {g(f'${sl_dist:,.1f}', GRAY)}"
+    atr_raw  = len(f"  ATR  {sig['atr']}   Stop distance: ${abs(sig['entry']-sig['sl']):,.1f}")
     print(g("  │", gc) + atr_line + " " * max(0, W-4-atr_raw) + g("│", gc))
 
     print(g("  ├" + "─" * (W-4) + "┤", GRAY))
@@ -799,6 +829,7 @@ def main():
     print(g("  Scanning every 60s. Press Ctrl+C to stop.\n", GRAY))
 
     last_sig_idx = -SIGNAL_GAP
+    loop_count = 0
 
     while True:
         try:
@@ -817,7 +848,12 @@ def main():
                     print_signal(sig)
                     send_telegram(sig)
                     last_sig_idx = idx
+                else:
+                    # Every 5 minutes show why no signal is firing
+                    if loop_count % 5 == 0:
+                        print_why_no_signal(df15, df1h, df4h, regime)
 
+            loop_count += 1
             time.sleep(60)
 
         except KeyboardInterrupt:
