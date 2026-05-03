@@ -68,9 +68,9 @@ TP_ATR_MULT   = 2.8
 MIN_RR        = 1.9
 SIGNAL_GAP    = 5         # candles between signals
 
-# Telegram (optional) — reads from env vars when hosted on Railway/etc.
-TG_TOKEN      = os.environ.get("TELEGRAM_TOKEN", "")
-TG_CHAT       = os.environ.get("TELEGRAM_CHAT",  "")
+# Telegram — env var takes priority (Railway), falls back to hardcoded for local run
+TG_TOKEN      = os.environ.get("TELEGRAM_TOKEN", "8775276870:AAGABvQ6PwtRgGPNbk3V4YX_A0eVXxpiWyo")
+TG_CHAT       = os.environ.get("TELEGRAM_CHAT",  "998659643")
 
 # ═══════════════════════════════════════════════════════════════
 #  CLEAN TERMINAL COLORS — no blinking, no choppy garbage
