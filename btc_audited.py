@@ -270,49 +270,50 @@ def find_swing_lows(df, end_idx, lookback=DIV_LOOKBACK, order=DIV_ORDER):
     return swings
 
 # ═══════════════════════════════════════════════════════════════
-#  MARKET REGIME
-#  Reads WHAT TYPE of market this is before signaling anything.
+#  MARKET REGIME — v3.0
+#  Reads WHAT TYPE of market this is. Vetoes trends without HTF alignment.
 # ═══════════════════════════════════════════════════════════════
 
 def regime(df15, df1h, df4h):
-    r   = df15.iloc[-1]
-    r1h = df1h.iloc[-1]
-    r4h = df4h.iloc[-1]
+    r   = df15.iloc[-2]   # v3.0: use CONFIRMED for regime to prevent flicker
+    r_p = df15.iloc[-3]
+    r1h = df1h.iloc[-2]
+    r4h = df4h.iloc[-2]
     p   = r.close
 
     # ── WHALE / NEWS GUARD ─────────────────────────────────────
-    # Current candle spike
     if r.vol_ratio > VOL_MAX_WHALE:
         return mk_regime("NEWS_MOVE", False,
             f"Volume {r.vol_ratio:.1f}× normal — whale/news. Skipping.", 0)
-    # Recent candles spike (news aftershock — last 3 candles)
-    recent = float(df15["vol_ratio"].iloc[-4:-1].max())
+    recent = float(df15["vol_ratio"].iloc[-5:-2].max())
     if recent > VOL_MAX_WHALE * 0.8:
         return mk_regime("NEWS_MOVE", False,
             f"Recent spike {recent:.1f}× — aftershock. Waiting.", 10)
 
-    # ── TREND UP ───────────────────────────────────────────────
-    up = int(p > r.e200) + int(p > r.e50) + int(r.e9 > r.e20) + \
-         int(r.adx > ADX_MIN) + int(r.adxp > r.adxn) + \
-         int(r1h.close > r1h.e50) + int(r4h.close > r4h.e200) + \
-         int(bool(r.swing_hi))
-    if up >= 5:
-        return mk_regime("TRENDING_UP", True,
-            f"Uptrend confirmed across 3 timeframes ({up}/8)", min(100, up*13))
+    # ── TREND UP (v3.0 HTF Veto & Slope) ───────────────────────
+    slope_up = r.e50 > r_p.e50
+    htf_bull = (r1h.close > r1h.e50) and (r4h.close > r4h.e200)
 
-    # ── TREND DOWN ─────────────────────────────────────────────
-    dn = int(p < r.e200) + int(p < r.e50) + int(r.e9 < r.e20) + \
-         int(r.adx > ADX_MIN) + int(r.adxn > r.adxp) + \
-         int(r1h.close < r1h.e50) + int(r4h.close < r4h.e200) + \
-         int(bool(r.swing_lo))
-    if dn >= 5:
-        return mk_regime("TRENDING_DOWN", True,
-            f"Downtrend confirmed across 3 timeframes ({dn}/8)", min(100, dn*13))
+    if slope_up and htf_bull:
+        up = int(p > r.e200) + int(p > r.e50) + int(r.e9 > r.e20) + \
+             int(r.adx > ADX_MIN) + int(r.adxp > r.adxn) + int(bool(r.swing_hi))
+        if up >= 4:
+            return mk_regime("TRENDING_UP", True,
+                f"Uptrend (HTF Aligned) ({up}/6)", min(100, up*16))
+
+    # ── TREND DOWN (v3.0 HTF Veto & Slope) ─────────────────────
+    slope_dn = r.e50 < r_p.e50
+    htf_bear = (r1h.close < r1h.e50) and (r4h.close < r4h.e200)
+
+    if slope_dn and htf_bear:
+        dn = int(p < r.e200) + int(p < r.e50) + int(r.e9 < r.e20) + \
+             int(r.adx > ADX_MIN) + int(r.adxn > r.adxp) + int(bool(r.swing_lo))
+        if dn >= 4:
+            return mk_regime("TRENDING_DOWN", True,
+                f"Downtrend (HTF Aligned) ({dn}/6)", min(100, dn*16))
 
     # ── RANGING ────────────────────────────────────────────────
-    # FIX #9: was unreachable because CHOPPY absorbed it
-    # Now checked BEFORE choppy, with a looser ADX test
-    bb_avg = float(df15["bb_w"].rolling(50).mean().iloc[-1])
+    bb_avg = float(df15["bb_w"].rolling(50).mean().iloc[-2])
     if r.adx < ADX_MIN and r.bb_w < bb_avg:
         return mk_regime("RANGING", True,
             f"Range-bound. ADX {r.adx:.0f}. Range-reversal signals active.", 50)
@@ -419,86 +420,92 @@ def mk_signal(direction, mode, price, atr, checks, reg, atr_avg=None, mtf_boost=
 def m_trend(df15, df1h, reg):
     """
     Trend-following: pullback + breakout.
-    v2.0: Anti-repaint — uses confirmed candle.
-    v2.0: VWAP and order-flow sub-checks added.
+    v3.0: Anti-Bull Trap distance filter + 8/10 mandate.
     """
     if reg["type"] not in ("TRENDING_UP", "TRENDING_DOWN"):
         return None
 
-    r  = df15.iloc[-2]    # CONFIRMED candle (anti-repaint)
-    p  = df15.iloc[-3]    # previous confirmed
-    r1 = df1h.iloc[-2]    # CONFIRMED 1H candle
+    r  = df15.iloc[-2]    # CONFIRMED
+    p  = df15.iloc[-3]    # prev confirmed
+    r1 = df1h.iloc[-2]
     price, atr, atr_avg = r.close, r.atr, r.atr_avg
 
+    # v3.0: Recent Dump/Pump Filter (prevent buying knife catches)
+    swing_hi_20 = float(df15["high"].iloc[-22:-2].max())
+    swing_lo_20 = float(df15["low"].iloc[-22:-2].min())
+    drop_pct = (swing_hi_20 - price) / swing_hi_20
+    pump_pct = (price - swing_lo_20) / swing_lo_20
+
     if reg["type"] == "TRENDING_UP":
+        if drop_pct > 0.012: # 1.2% drop is a crash, block breakouts
+            return None
+        
         pb = [
-            price > r.e200,
-            price > r.e50,
-            r.e9  > r.e20,
-            40 < r.rsi < 68,
-            r.macdh > r.macdh1,
-            r.vol_ratio >= VOL_MIN_SIGNAL,
-            r.adxp > r.adxn,
-            r.bull == 1,
-            r1.close > r1.e50,
-            price < r.vwap or r.flow > 0.1,   # v2.0: VWAP discount or buying flow
+            price > r.e200, price > r.e50, r.e9 > r.e20,
+            40 < r.rsi < 68, r.macdh > r.macdh1,
+            r.vol_ratio >= VOL_MIN_SIGNAL, r.adxp > r.adxn,
+            r.bull == 1, r1.close > r1.e50,
+            price < r.vwap or r.flow > 0.1,
         ]
         bk = [
             price > r.e200,
             p.close < p.e20 and price > r.e20,
             r.vol_ratio >= 1.5,
-            r.rsi > 45,
-            r.macd > r.macds,
-            r.adx > ADX_MIN,
-            r.bull == 1,
-            r1.close > r1.e50,
-            r.flow > 0,                        # v2.0: net buying pressure
+            r.rsi > 45, r.macd > r.macds,
+            r.adx > ADX_MIN, r.bull == 1,
+            r1.close > r1.e50, r.flow > 0,
+            r.high > df15["high"].iloc[-4:-2].max() # New high check
         ]
-        if sum(int(b) for b in pb) >= 7:
+        # v3.0 requires 8/10 checks to pass
+        if sum(int(b) for b in pb) >= 8:
             return mk_signal("LONG", "TREND PULLBACK", price, atr, pb, reg, atr_avg)
-        if sum(int(b) for b in bk) >= 6:
+        if sum(int(b) for b in bk) >= 8:
             return mk_signal("LONG", "TREND BREAKOUT", price, atr, bk, reg, atr_avg)
 
     if reg["type"] == "TRENDING_DOWN":
+        if pump_pct > 0.012: # Block shorts on massive squeeze pumps
+            return None
+
         pb = [
-            price < r.e200,
-            price < r.e50,
-            r.e9  < r.e20,
-            32 < r.rsi < 60,
-            r.macdh < r.macdh1,
-            r.vol_ratio >= VOL_MIN_SIGNAL,
-            r.adxn > r.adxp,
-            r.bull == 0,
-            r1.close < r1.e50,
-            price > r.vwap or r.flow < -0.1,  # v2.0: VWAP premium or selling flow
+            price < r.e200, price < r.e50, r.e9 < r.e20,
+            32 < r.rsi < 60, r.macdh < r.macdh1,
+            r.vol_ratio >= VOL_MIN_SIGNAL, r.adxn > r.adxp,
+            r.bull == 0, r1.close < r1.e50,
+            price > r.vwap or r.flow < -0.1,
         ]
         bk = [
             price < r.e200,
             p.close > p.e20 and price < r.e20,
             r.vol_ratio >= 1.5,
-            r.rsi < 55,
-            r.macd < r.macds,
-            r.adx > ADX_MIN,
-            r.bull == 0,
-            r1.close < r1.e50,
-            r.flow < 0,
+            r.rsi < 55, r.macd < r.macds,
+            r.adx > ADX_MIN, r.bull == 0,
+            r1.close < r1.e50, r.flow < 0,
+            r.low_ < df15["low"].iloc[-4:-2].min()
         ]
-        if sum(int(b) for b in pb) >= 7:
+        if sum(int(b) for b in pb) >= 8:
             return mk_signal("SHORT", "TREND PULLBACK", price, atr, pb, reg, atr_avg)
-        if sum(int(b) for b in bk) >= 6:
+        if sum(int(b) for b in bk) >= 8:
             return mk_signal("SHORT", "TREND BREAKOUT", price, atr, bk, reg, atr_avg)
 
     return None
 
 def m_rejection(df15, reg):
     """
-    Wick rejection with v2.0 engulfing + flow checks.
+    Wick rejection. v3.0: Key Level Confluence required.
     Anti-repaint: confirmed candle only.
     """
     if not reg["tradeable"]:
         return None
     r  = df15.iloc[-2]                         # CONFIRMED
     price, atr, atr_avg = r.close, r.atr, r.atr_avg
+
+    # v3.0: Key Level Confluence (VWAP, 50EMA, or 200EMA)
+    # Ignore wicks floating in the middle of nowhere
+    d_vwap = abs(price - r.vwap) / price
+    d_200  = abs(price - r.e200) / price
+    d_50   = abs(price - r.e50) / price
+    if min(d_vwap, d_200, d_50) > 0.005: 
+        return None
 
     sc = [
         r.hiw > r.body * 2.0,
@@ -520,43 +527,50 @@ def m_rejection(df15, reg):
         r.flow > 0,
         bool(r.bull_engulf),
     ]
-    if sum(int(b) for b in sc) >= 5:
+    # v3.0: Require 6/8 instead of 5/8
+    if sum(int(b) for b in sc) >= 6:
         return mk_signal("SHORT", "REJECTION", price, atr, sc, reg, atr_avg)
-    if sum(int(b) for b in lc) >= 5:
+    if sum(int(b) for b in lc) >= 6:
         return mk_signal("LONG",  "REJECTION", price, atr, lc, reg, atr_avg)
     return None
 
 def m_reversal(df15, df1h, reg):
     """
-    RSI exhaustion reversal. Anti-repaint + engulfing sub-check.
+    RSI exhaustion. v3.0: Volume Mandate & Stoch Cross required.
     """
     if not reg["tradeable"]:
         return None
     r  = df15.iloc[-2]                         # CONFIRMED
+    p  = df15.iloc[-3]                         # PREV CONFIRMED
     r1 = df1h.iloc[-2]                         # CONFIRMED 1H
     price, atr, atr_avg = r.close, r.atr, r.atr_avg
+
+    # v3.0: Stochastic Cross Confirmation
+    stoch_cross_up = r.stk > r.std and p.stk <= p.std
+    stoch_cross_dn = r.stk < r.std and p.stk >= p.std
 
     lc = [
         r.rsi < RSI_EXTREME_OS,
         r.rsi > r.rsi1,
-        r.stk < 25 and r.stk > r.std,
+        stoch_cross_up,                        # v3.0: Stoch must be crossing UP
         r.macdh > r.macdh1,
         r.low_ > r.body * 0.8,
         r1.rsi < 48,
-        bool(r.bull_engulf) or r.flow > 0.2,   # v2.0: engulfing or strong buying
+        bool(r.bull_engulf) or r.flow > 0.3,   # v3.0: Requires HEAVY buying (0.3)
     ]
     sc = [
         r.rsi > RSI_EXTREME_OB,
         r.rsi < r.rsi1,
-        r.stk > 75 and r.stk < r.std,
+        stoch_cross_dn,                        # v3.0: Stoch must be crossing DOWN
         r.macdh < r.macdh1,
         r.hiw > r.body * 0.8,
         r1.rsi > 52,
-        bool(r.bear_engulf) or r.flow < -0.2,
+        bool(r.bear_engulf) or r.flow < -0.3,  # v3.0: Requires HEAVY selling (-0.3)
     ]
-    if sum(int(b) for b in lc) >= 5:
+    # v3.0: Require 6/7 checks
+    if sum(int(b) for b in lc) >= 6:
         return mk_signal("LONG",  "REVERSAL", price, atr, lc, reg, atr_avg)
-    if sum(int(b) for b in sc) >= 5:
+    if sum(int(b) for b in sc) >= 6:
         return mk_signal("SHORT", "REVERSAL", price, atr, sc, reg, atr_avg)
     return None
 
@@ -970,14 +984,40 @@ def _start_keepalive_server():
 # ═══════════════════════════════════════════════════════════════
 
 def main():
-    # Start keepalive server in background thread (for Render/UptimeRobot)
-    t = threading.Thread(target=_start_keepalive_server, daemon=True)
-    t.start()
+    cron_mode = "--cron" in sys.argv
+
+    if not cron_mode:
+        # Start keepalive server in background thread (for Render/UptimeRobot)
+        t = threading.Thread(target=_start_keepalive_server, daemon=True)
+        t.start()
 
     print_header()
     print(s(f"  Connecting to {EXCHANGE.upper()}...", GY), end="", flush=True)
     ex = connect()
     print(s(" connected.", BGN))
+    
+    if cron_mode:
+        print(s("  Running in CRON mode (single execution).", CY))
+        try:
+            df15 = ind(fetch(ex, TF_15M))
+            df1h = ind(fetch(ex, TF_1H))
+            df4h = ind(fetch(ex, TF_4H))
+            reg = regime(df15, df1h, df4h)
+            
+            print_status(df15, df1h, df4h, reg)
+            sig = run_modes(df15, df1h, df4h, reg)
+            
+            if sig:
+                print_signal(sig)
+                send_tg(sig)
+            else:
+                print_tracker(df15, df1h, reg)
+                print(s("  No signal found on this 15m close.", GY))
+            sys.exit(0)
+        except Exception as e:
+            print(s(f"  CRON Error: {e}", RD))
+            sys.exit(1)
+
     print(s("  Scanning every 60s. Tracker prints every 5 min.\n", GY))
 
     # FIX #5: track last signal by actual candle index, not loop count
