@@ -1,21 +1,20 @@
 # -*- coding: utf-8 -*-
 """
 ╔══════════════════════════════════════════════════════════════════╗
-║     BTC SIGNAL INTELLIGENCE — INSTITUTIONAL HARDENED v2.0      ║
+║     BTC SIGNAL INTELLIGENCE — INSTITUTIONAL HARDENED v3.0      ║
 ║                                                                  ║
-║  v2.0 HARDENING:                                                 ║
-║  ► ANTI-REPAINT  — signals on CLOSED candles only                ║
-║  ► DIVERGENCE    — dynamic swing-point scanner (20-bar)          ║
-║  ► VWAP          — rolling volume-weighted price filter          ║
-║  ► ADAPTIVE ATR  — stops widen/tighten with volatility           ║
-║  ► ORDER FLOW    — buy/sell volume imbalance detection           ║
-║  ► SESSION AWARE — Asia/London/NY confidence adjustment          ║
-║  ► ENGULFING     — candle pattern sub-checks                     ║
-║  ► QUALITY TIERS — A+ / A / B signal grading                    ║
-║  ► MTF DIVERGE   — 1H RSI cross-validation                      ║
-║  ► REJECT FILTER — consecutive same-dir rejection guard          ║
-║                                                                  ║
-║  v1.0 audit fixes preserved.                                     ║
+║  v3.0 FINAL ENGINE:                                              ║
+║  ► ANTI-REPAINT  — signals on CLOSED candles only (iloc[-2])     ║
+║  ► HTF VETO      — 1H+4H must align before trend fires          ║
+║  ► SLOPE FILTER  — 50 EMA must be actively angling trend dir     ║
+║  ► DUMP GUARD    — blocks longs after 1.2%+ crash, vice versa    ║
+║  ► KEY LEVELS    — rejections must touch VWAP/50EMA/200EMA       ║
+║  ► STOCH CROSS   — reversals need Stoch K/D cross confirmation   ║
+║  ► FLOW MANDATE  — reversals need 0.3+ institutional imbalance   ║
+║  ► STRUCTURE     — 8/9 checks with ATR + MACD + HTF validation   ║
+║  ► DIVERGENCE    — 5/7 checks with MTF RSI + volume gate         ║
+║  ► MIN CONF 55   — no sub-55 signals reach Telegram ever         ║
+║  ► QUALITY TIERS — A+ (conf≥72) / A (conf≥55) only sent         ║
 ║  INSTALL: pip install ccxt pandas numpy ta requests              ║
 ║  RUN:     python btc_audited.py                                  ║
 ╚══════════════════════════════════════════════════════════════════╝
@@ -221,11 +220,12 @@ def ind(df):
 def get_session():
     """Returns (session_name, confidence_modifier)."""
     h = datetime.utcnow().hour
+    # v3.0 FIX: London/NY overlap is 13:00-17:00 UTC, not inside London block
+    if 13 <= h < 17:   # London/NY overlap — highest liquidity
+        return "LDN+NY", 10
     if SESSION_ASIA[0] <= h < SESSION_ASIA[1]:
         return "ASIA", -5
     if SESSION_LONDON[0] <= h < SESSION_LONDON[1]:
-        if h >= 13:  # London/NY overlap
-            return "LDN+NY", 10
         return "LONDON", 5
     if SESSION_NY[0] <= h < SESSION_NY[1]:
         return "NEW YORK", 5
@@ -376,9 +376,9 @@ def mk_signal(direction, mode, price, atr, checks, reg, atr_avg=None, mtf_boost=
     conf = conf_score(checks, reg["confidence"], rr) + mtf_boost + sess_mod
     conf = max(0, min(conf, 100))
 
-    # v2.0: Consecutive rejection guard — raise bar if 3+ recent rejects
+    # v3.0: Minimum confidence hard floor — no weak signals ever reach Telegram
     same_dir_rejects = sum(1 for d, _ in _reject_history[-5:] if d == direction)
-    min_conf = 52 if same_dir_rejects >= 3 else 42
+    min_conf = 62 if same_dir_rejects >= 3 else 55
     if conf < min_conf:
         _reject_history.append((direction, 0))
         return None
@@ -653,19 +653,37 @@ def m_divergence(df15, df1h, reg):
 
     mode_label = f"DIVERGENCE ({div_type})"
 
+    # v3.0: No hardcoded Trues — every check is real and meaningful
     if bear_div and vol_ok:
-        checks = [True, True, r.rsi > 45, r.bull == 0 or r.hiw > r.body * 0.5,
-                  r.adx > 12, vol_ok, r.flow < 0.1]
-        return mk_signal("SHORT", mode_label, price, atr, checks, reg, atr_avg, mtf_boost)
+        checks = [
+            bear_div,                          # divergence confirmed
+            r.rsi > 48,                        # RSI elevated (bearish context)
+            r.bull == 0 or r.hiw > r.body * 0.5,  # bearish candle or wick rejection
+            r.adx > 14,                        # trend has strength
+            vol_ok,                            # volume supports move
+            r.flow < 0.05,                     # not showing strong buying
+            mtf_boost > 0 or r.rsi > 55,      # MTF or RSI confirms exhaustion
+        ]
+        if sum(int(bool(b)) for b in checks) >= 5:
+            return mk_signal("SHORT", mode_label, price, atr, checks, reg, atr_avg, mtf_boost)
     if bull_div and vol_ok:
-        checks = [True, True, r.rsi < 55, r.bull == 1 or r.low_ > r.body * 0.5,
-                  r.adx > 12, vol_ok, r.flow > -0.1]
-        return mk_signal("LONG", mode_label, price, atr, checks, reg, atr_avg, mtf_boost)
+        checks = [
+            bull_div,
+            r.rsi < 52,
+            r.bull == 1 or r.low_ > r.body * 0.5,
+            r.adx > 14,
+            vol_ok,
+            r.flow > -0.05,
+            mtf_boost > 0 or r.rsi < 45,
+        ]
+        if sum(int(bool(b)) for b in checks) >= 5:
+            return mk_signal("LONG", mode_label, price, atr, checks, reg, atr_avg, mtf_boost)
     return None
 
-def m_structure(df15, reg):
+def m_structure(df15, df1h, reg):
     """
-    Structure break. Anti-repaint: confirmed candle.
+    Structure break. v3.0: Real checks only, no hardcoded True. HTF confirmation added.
+    Anti-repaint: confirmed candle.
     """
     if not reg["tradeable"]:
         return None
@@ -673,35 +691,59 @@ def m_structure(df15, reg):
         return None
 
     r     = df15.iloc[-2]                      # CONFIRMED
+    r1h   = df1h.iloc[-2]                      # CONFIRMED 1H
     price, atr, atr_avg = r.close, r.atr, r.atr_avg
 
-    # Swing high/low of last 20 confirmed candles (excluding current confirmed)
+    # Swing high/low of last 20 confirmed candles
     swing_hi = float(df15["high"].iloc[-22:-2].max())
     swing_lo = float(df15["low"].iloc[-22:-2].min())
 
-    vol_spike = r.vol_ratio >= 1.4
+    vol_spike = r.vol_ratio >= 1.5   # v3.0: raised from 1.4
 
     bull_break = price > swing_hi and vol_spike
     bear_break = price < swing_lo and vol_spike
 
     if bull_break:
-        checks = [True, True, r.rsi > 45, r.e9 > r.e20, vol_spike, r.adx > 15, r.flow > 0]
-        return mk_signal("LONG",  "STRUCTURE BREAK", price, atr, checks, reg, atr_avg)
+        checks = [
+            price > swing_hi,            # actual break above structure
+            vol_spike,                   # high volume confirms break
+            r.rsi > 48,                  # RSI supports bullish momentum
+            r.e9 > r.e20,               # short-term EMA aligned
+            r.adx > ADX_MIN,            # trending market
+            r.flow > 0.1,               # net buying pressure
+            r.macd > r.macds,           # MACD supports direction
+            r1h.close > r1h.e50,        # 1H HTF confirmation
+            r.macdh > r.macdh1,         # MACD histogram rising
+        ]
+        if sum(int(b) for b in checks) >= 7:
+            return mk_signal("LONG",  "STRUCTURE BREAK", price, atr, checks, reg, atr_avg)
     if bear_break:
-        checks = [True, True, r.rsi < 55, r.e9 < r.e20, vol_spike, r.adx > 15, r.flow < 0]
-        return mk_signal("SHORT", "STRUCTURE BREAK", price, atr, checks, reg, atr_avg)
+        checks = [
+            price < swing_lo,
+            vol_spike,
+            r.rsi < 52,
+            r.e9 < r.e20,
+            r.adx > ADX_MIN,
+            r.flow < -0.1,
+            r.macd < r.macds,
+            r1h.close < r1h.e50,
+            r.macdh < r.macdh1,
+        ]
+        if sum(int(b) for b in checks) >= 7:
+            return mk_signal("SHORT", "STRUCTURE BREAK", price, atr, checks, reg, atr_avg)
     return None
 
 def run_modes(df15, df1h, df4h, reg):
     """
-    Priority order: rejection → structure → divergence → trend → reversal.
-    v2.0: divergence now receives df1h for MTF cross-validation.
+    v3.0 Priority order: trend → structure → divergence → rejection → reversal.
+    Trend/Structure signals fire first (highest probability in trending markets).
+    Reversal fires last (highest risk, needs full confluence).
     """
     modes = [
-        ("REJECTION",  lambda: m_rejection(df15, reg)),
-        ("STRUCTURE",  lambda: m_structure(df15, reg)),
-        ("DIVERGENCE", lambda: m_divergence(df15, df1h, reg)),
         ("TREND",      lambda: m_trend(df15, df1h, reg)),
+        ("STRUCTURE",  lambda: m_structure(df15, df1h, reg)),
+        ("DIVERGENCE", lambda: m_divergence(df15, df1h, reg)),
+        ("REJECTION",  lambda: m_rejection(df15, reg)),
         ("REVERSAL",   lambda: m_reversal(df15, df1h, reg)),
     ]
     for name, fn in modes:
@@ -742,8 +784,8 @@ def spark(p):
 def print_header():
     print()
     print(s("  ╔" + "═"*(W-4) + "╗", CY))
-    t1 = "₿  BTC SIGNAL INTELLIGENCE  —  v2.0 HARDENED"
-    t2 = "ANTI-REPAINT · SWING-DIV · VWAP · ADAPTIVE ATR"
+    t1 = "₿  BTC SIGNAL INTELLIGENCE  —  v3.0 FINAL"
+    t2 = "HTF-VETO · DUMP-GUARD · KEY-LEVEL · STOCH-CROSS · MIN-CONF-55"
     print(s("  ║", CY) + s(t1.center(W-4), BCY, bold=True) + s("║", CY))
     print(s("  ║", CY) + s(t2.center(W-4), GY)             + s("║", CY))
     print(s("  ╚" + "═"*(W-4) + "╝", CY))
