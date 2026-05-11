@@ -364,15 +364,16 @@ def regime(df15, df1h, df4h):
             return mk_regime("TRENDING_DOWN", True,
                 f"Downtrend (HTF Aligned) ({dn}/6)", min(100, dn*16))
 
-    # ── RANGING ────────────────────────────────────────────────
+    # ── RANGING (v4.0 fix: OR logic captures more sideways markets) ────
+    # ADX below threshold OR BB bands are not expanding—either means ranging
     bb_avg = float(df15["bb_w"].rolling(50).mean().iloc[-2])
-    if r.adx < ADX_MIN and r.bb_w < bb_avg:
+    if r.adx < ADX_MIN or r.bb_w < bb_avg * 1.1:
         return mk_regime("RANGING", True,
-            f"Range-bound. ADX {r.adx:.0f}. Range-reversal signals active.", 50)
+            f"Range-bound. ADX {r.adx:.0f}. Reversal/Rejection signals active.", 55)
 
-    # ── CHOPPY / UNCLEAR ───────────────────────────────────────
+    # ── CHOPPY — last resort, very small window now ────────────────────
     return mk_regime("CHOPPY", False,
-        f"No clear structure. ADX {r.adx:.0f}. Waiting.", 20)
+        f"Conflicting signals. ADX {r.adx:.0f}. Waiting.", 20)
 
 def mk_regime(rtype, tradeable, reason, conf):
     return {"type": rtype, "tradeable": tradeable,
@@ -443,22 +444,21 @@ def mk_signal(direction, mode, price, atr, checks, reg, atr_avg=None, mtf_boost=
     conf = conf_score(checks, reg["confidence"], rr) + mtf_boost + sess_mod + smc_boost + sent_boost
     conf = max(0, min(conf, 100))
 
-    # v4.0 STRICT: Hard floor 70 — only high-conviction signals pass
-    # Raised to 75 if consecutive same-direction rejects detected (choppy market)
+    # v4.0 FINAL: Hard confidence floor — 65 minimum, 73 if on rejection streak
     same_dir_rejects = sum(1 for d, _ in _reject_history[-5:] if d == direction)
-    min_conf = 75 if same_dir_rejects >= 3 else 70
+    min_conf = 73 if same_dir_rejects >= 3 else 65
     if conf < min_conf:
         _reject_history.append((direction, 0))
         return None
 
-    # Quality tier
+    # v4.0 FINAL: Quality tier — only A+ reaches Telegram
     htf_ok = reg["confidence"] >= 60
     if conf >= 72 and htf_ok:
         tier = "A+"
-    elif conf >= 55:
-        tier = "A"
+    elif conf >= 65:
+        tier = "A"    # tracked internally, NOT sent to Telegram
     else:
-        tier = "B"
+        tier = "B"    # blocked
 
     return {
         "dir":     direction,
@@ -1050,11 +1050,10 @@ def print_signal(sig):
 def send_tg(sig):
     if not TG_TOKEN or not TG_CHAT or not sig:
         return
-    # v4.0 STRICT: Only A+ grade signals reach Telegram
-    # A+ requires: confidence >= 72 AND HTF regime confidence >= 60
     tier = sig.get('tier', 'B')
+    # v4.0 FINAL: Only A+ signals reach Telegram — most powerful trades only
     if tier != 'A+':
-        print(s(f"  Telegram: skipped (tier {tier} — only A+ sent)", GY))
+        print(s(f"  Telegram: skipped (tier {tier}, need A+)", GY))
         return
     em  = "🟢" if sig["dir"]=="LONG" else "🔴"
     tc  = "🏆" if tier == "A+" else "⚡"
