@@ -211,6 +211,28 @@ def ind(df):
     df["bear_engulf"] = ((df["bull"] == 0) & (df["bull"].shift(1) == 1) &
                          (df["open"] > c.shift(1)) & (c < df["open"].shift(1)))
 
+    # ── v4.0: Smart Money Concepts (SMC) ─────────────────────
+    # Fair Value Gap (FVG): 3-candle imbalance — institutional displacement zone
+    # Bullish FVG: current candle's low is above the high of 2 candles ago
+    df["fvg_bull"] = l > h.shift(2)
+    # Bearish FVG: current candle's high is below the low of 2 candles ago
+    df["fvg_bear"] = h < l.shift(2)
+
+    # Order Block (OB): Last opposing candle before a high-volume displacement move
+    # A bullish OB is a bearish candle (red) right before strong upward displacement
+    # A bearish OB is a bullish candle (green) right before strong downward displacement
+    strong_up = (c > c.shift(1)) & (v > df["vol_ma"] * 1.4)
+    strong_dn = (c < c.shift(1)) & (v > df["vol_ma"] * 1.4)
+    df["ob_bull"] = (df["bull"].shift(1) == 0) & strong_up   # Red candle before strong up
+    df["ob_bear"] = (df["bull"].shift(1) == 1) & strong_dn   # Green candle before strong down
+
+    # Liquidity Sweep: Price wicks above/below a recent high/low but closes back
+    # This is a "stop hunt" — sweeping retail stops before reversing
+    recent_hi = h.rolling(10).max().shift(1)
+    recent_lo = l.rolling(10).min().shift(1)
+    df["sweep_hi"] = (h > recent_hi) & (c < recent_hi)  # Swept highs, closed below = short signal
+    df["sweep_lo"] = (l < recent_lo) & (c > recent_lo)  # Swept lows, closed above = long signal
+
     return df
 
 # ═══════════════════════════════════════════════════════════════
@@ -230,6 +252,36 @@ def get_session():
     if SESSION_NY[0] <= h < SESSION_NY[1]:
         return "NEW YORK", 5
     return "OFF-HOURS", -10
+
+# ═══════════════════════════════════════════════════════════════
+#  v4.0: MARKET SENTIMENT — Fear & Greed Index
+#  Free API from Alternative.me. No key required. Cached 1hr.
+#  Extreme Fear = contrarian LONG bias. Extreme Greed = SHORT bias.
+# ═══════════════════════════════════════════════════════════════
+
+_sentiment_cache = {"data": None, "ts": 0}
+
+def get_sentiment():
+    """Fetch Bitcoin Fear & Greed Index. Free, no API key needed."""
+    global _sentiment_cache
+    now = time.time()
+    if _sentiment_cache["data"] and (now - _sentiment_cache["ts"]) < 3600:
+        return _sentiment_cache["data"]
+    try:
+        r = requests.get("https://api.alternative.me/fng/?limit=1", timeout=8)
+        d = r.json()["data"][0]
+        val   = int(d["value"])
+        label = d["value_classification"]
+        if val <= 20:   bias, mod = "EXTREME FEAR",  +8  # Contrarian buy signal
+        elif val <= 40: bias, mod = "FEAR",           +4
+        elif val <= 60: bias, mod = "NEUTRAL",          0
+        elif val <= 80: bias, mod = "GREED",           -3
+        else:           bias, mod = "EXTREME GREED",  -8  # Contrarian sell signal
+        result = {"value": val, "label": label, "bias": bias, "mod": mod}
+        _sentiment_cache = {"data": result, "ts": now}
+        return result
+    except Exception:
+        return {"value": 50, "label": "Neutral", "bias": "NEUTRAL", "mod": 0}
 
 # ═══════════════════════════════════════════════════════════════
 #  v2.0: SWING-POINT PIVOT DETECTION
@@ -339,22 +391,19 @@ def conf_score(checks, reg_conf, rr):
     return round(min(filter_score + rr_score + regime_score, 100))
 
 # ═══════════════════════════════════════════════════════════════
-#  SIGNAL BUILDER — v2.0: Adaptive ATR + Session + Quality Tiers
+#  SIGNAL BUILDER — v4.0: SMC + Sentiment + Adaptive ATR
 # ═══════════════════════════════════════════════════════════════
 
-# v2.0: Consecutive rejection tracker
+# Consecutive rejection tracker
 _reject_history = []   # list of (direction, candle_idx)
 
-def mk_signal(direction, mode, price, atr, checks, reg, atr_avg=None, mtf_boost=0):
-    # v2.0: Adaptive ATR stops — widen in high vol, tighten in low vol
+def mk_signal(direction, mode, price, atr, checks, reg, atr_avg=None, mtf_boost=0, smc=None, sentiment=None):
+    # Adaptive ATR stops — widen in high vol, tighten in low vol
     if atr_avg and atr_avg > 0:
         vr = atr / atr_avg
-        if vr > 1.5:
-            sl_m, tp_m = 1.5, 3.2
-        elif vr < 0.7:
-            sl_m, tp_m = 1.0, 2.2
-        else:
-            sl_m, tp_m = SL_ATR, TP_ATR
+        if vr > 1.5:   sl_m, tp_m = 1.5, 3.2
+        elif vr < 0.7: sl_m, tp_m = 1.0, 2.2
+        else:          sl_m, tp_m = SL_ATR, TP_ATR
     else:
         sl_m, tp_m = SL_ATR, TP_ATR
 
@@ -371,19 +420,37 @@ def mk_signal(direction, mode, price, atr, checks, reg, atr_avg=None, mtf_boost=
     if rr < MIN_RR:
         return None
 
-    # v2.0: Session-aware confidence
+    # Session confidence
     sess_name, sess_mod = get_session()
-    conf = conf_score(checks, reg["confidence"], rr) + mtf_boost + sess_mod
+
+    # v4.0: SMC Confluence boost — reward institutional signals
+    smc_boost = 0
+    smc_tags  = []
+    if smc:
+        if smc.get("fvg"):   smc_boost += 8;  smc_tags.append("FVG")
+        if smc.get("ob"):    smc_boost += 6;  smc_tags.append("OB")
+        if smc.get("sweep"): smc_boost += 10; smc_tags.append("SWEEP")
+
+    # v4.0: Sentiment alignment boost
+    sent_boost = 0
+    if sentiment:
+        if direction == "LONG"  and sentiment["mod"] > 0: sent_boost = sentiment["mod"]
+        if direction == "SHORT" and sentiment["mod"] < 0: sent_boost = abs(sentiment["mod"])
+        # Penalise if trading AGAINST sentiment
+        if direction == "LONG"  and sentiment["mod"] < -3: sent_boost = sentiment["mod"]
+        if direction == "SHORT" and sentiment["mod"] > 3:  sent_boost = -sentiment["mod"]
+
+    conf = conf_score(checks, reg["confidence"], rr) + mtf_boost + sess_mod + smc_boost + sent_boost
     conf = max(0, min(conf, 100))
 
-    # v3.0: Minimum confidence hard floor — no weak signals ever reach Telegram
+    # v3.0 hard floor — no weak signals reach Telegram
     same_dir_rejects = sum(1 for d, _ in _reject_history[-5:] if d == direction)
     min_conf = 62 if same_dir_rejects >= 3 else 55
     if conf < min_conf:
         _reject_history.append((direction, 0))
         return None
 
-    # v2.0: Quality tier
+    # Quality tier
     htf_ok = reg["confidence"] >= 60
     if conf >= 72 and htf_ok:
         tier = "A+"
@@ -393,22 +460,24 @@ def mk_signal(direction, mode, price, atr, checks, reg, atr_avg=None, mtf_boost=
         tier = "B"
 
     return {
-        "dir":   direction,
-        "mode":  mode,
-        "entry": round(price, 1),
-        "sl":    sl,
-        "tp":    tp,
-        "rr":    rr,
-        "conf":  conf,
-        "tier":  tier,
-        "regime":reg["type"],
-        "passed":sum(int(bool(c)) for c in checks),
-        "total": len(checks),
-        "time":  datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "atr":   round(atr, 1),
+        "dir":     direction,
+        "mode":    mode,
+        "entry":   round(price, 1),
+        "sl":      sl,
+        "tp":      tp,
+        "rr":      rr,
+        "conf":    conf,
+        "tier":    tier,
+        "regime":  reg["type"],
+        "passed":  sum(int(bool(c)) for c in checks),
+        "total":   len(checks),
+        "time":    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "atr":     round(atr, 1),
         "sl_mode": "WIDE" if (atr_avg and atr_avg > 0 and atr/atr_avg > 1.5) else
                    ("TIGHT" if (atr_avg and atr_avg > 0 and atr/atr_avg < 0.7) else "STD"),
         "session": sess_name,
+        "smc_tags": smc_tags,
+        "sentiment": sentiment or {"value": 50, "label": "Neutral", "bias": "NEUTRAL"},
     }
 
 # ═══════════════════════════════════════════════════════════════
@@ -419,27 +488,32 @@ def mk_signal(direction, mode, price, atr, checks, reg, atr_avg=None, mtf_boost=
 
 def m_trend(df15, df1h, reg):
     """
-    Trend-following: pullback + breakout.
-    v3.0: Anti-Bull Trap distance filter + 8/10 mandate.
+    v4.0: Trend-following with SMC confluence (FVG/OB/Sweep).
     """
     if reg["type"] not in ("TRENDING_UP", "TRENDING_DOWN"):
         return None
 
-    r  = df15.iloc[-2]    # CONFIRMED
-    p  = df15.iloc[-3]    # prev confirmed
+    r  = df15.iloc[-2]
+    p  = df15.iloc[-3]
     r1 = df1h.iloc[-2]
     price, atr, atr_avg = r.close, r.atr, r.atr_avg
 
-    # v3.0: Recent Dump/Pump Filter (prevent buying knife catches)
     swing_hi_20 = float(df15["high"].iloc[-22:-2].max())
     swing_lo_20 = float(df15["low"].iloc[-22:-2].min())
-    drop_pct = (swing_hi_20 - price) / swing_hi_20
-    pump_pct = (price - swing_lo_20) / swing_lo_20
+    drop_pct    = (swing_hi_20 - price) / swing_hi_20
+    pump_pct    = (price - swing_lo_20) / swing_lo_20
+
+    sentiment = get_sentiment()
 
     if reg["type"] == "TRENDING_UP":
-        if drop_pct > 0.012: # 1.2% drop is a crash, block breakouts
+        if drop_pct > 0.012:
             return None
-        
+        # v4.0: Detect SMC confluence for boost
+        smc = {
+            "fvg":   bool(r.fvg_bull),
+            "ob":    bool(r.ob_bull),
+            "sweep": bool(r.sweep_lo),   # Swept lows before long = clean entry
+        }
         pb = [
             price > r.e200, price > r.e50, r.e9 > r.e20,
             40 < r.rsi < 68, r.macdh > r.macdh1,
@@ -454,18 +528,21 @@ def m_trend(df15, df1h, reg):
             r.rsi > 45, r.macd > r.macds,
             r.adx > ADX_MIN, r.bull == 1,
             r1.close > r1.e50, r.flow > 0,
-            r.high > df15["high"].iloc[-4:-2].max() # New high check
+            r.high > df15["high"].iloc[-4:-2].max()
         ]
-        # v3.0 requires 8/10 checks to pass
         if sum(int(b) for b in pb) >= 8:
-            return mk_signal("LONG", "TREND PULLBACK", price, atr, pb, reg, atr_avg)
+            return mk_signal("LONG", "TREND PULLBACK", price, atr, pb, reg, atr_avg, smc=smc, sentiment=sentiment)
         if sum(int(b) for b in bk) >= 8:
-            return mk_signal("LONG", "TREND BREAKOUT", price, atr, bk, reg, atr_avg)
+            return mk_signal("LONG", "TREND BREAKOUT", price, atr, bk, reg, atr_avg, smc=smc, sentiment=sentiment)
 
     if reg["type"] == "TRENDING_DOWN":
-        if pump_pct > 0.012: # Block shorts on massive squeeze pumps
+        if pump_pct > 0.012:
             return None
-
+        smc = {
+            "fvg":   bool(r.fvg_bear),
+            "ob":    bool(r.ob_bear),
+            "sweep": bool(r.sweep_hi),   # Swept highs before short = clean entry
+        }
         pb = [
             price < r.e200, price < r.e50, r.e9 < r.e20,
             32 < r.rsi < 60, r.macdh < r.macdh1,
@@ -483,9 +560,9 @@ def m_trend(df15, df1h, reg):
             r.low_ < df15["low"].iloc[-4:-2].min()
         ]
         if sum(int(b) for b in pb) >= 8:
-            return mk_signal("SHORT", "TREND PULLBACK", price, atr, pb, reg, atr_avg)
+            return mk_signal("SHORT", "TREND PULLBACK", price, atr, pb, reg, atr_avg, smc=smc, sentiment=sentiment)
         if sum(int(b) for b in bk) >= 8:
-            return mk_signal("SHORT", "TREND BREAKOUT", price, atr, bk, reg, atr_avg)
+            return mk_signal("SHORT", "TREND BREAKOUT", price, atr, bk, reg, atr_avg, smc=smc, sentiment=sentiment)
 
     return None
 
@@ -1011,7 +1088,7 @@ class _PingHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"BTC Signal Intelligence v2.0 - Running OK")
+        self.wfile.write(b"BTC Signal Intelligence v4.0 APEX - Running OK")
     def log_message(self, fmt, *args):  # Silence noisy access logs
         pass
 
@@ -1044,11 +1121,15 @@ def main():
             df15 = ind(fetch(ex, TF_15M))
             df1h = ind(fetch(ex, TF_1H))
             df4h = ind(fetch(ex, TF_4H))
-            reg = regime(df15, df1h, df4h)
-            
+            reg  = regime(df15, df1h, df4h)
+
+            # v4.0: Fetch sentiment once per cron run
+            sent = get_sentiment()
+            print(s(f"  Sentiment: {sent['bias']} ({sent['value']}) — {sent['label']}", CY))
+
             print_status(df15, df1h, df4h, reg)
             sig = run_modes(df15, df1h, df4h, reg)
-            
+
             if sig:
                 print_signal(sig)
                 send_tg(sig)
