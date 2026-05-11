@@ -443,9 +443,10 @@ def mk_signal(direction, mode, price, atr, checks, reg, atr_avg=None, mtf_boost=
     conf = conf_score(checks, reg["confidence"], rr) + mtf_boost + sess_mod + smc_boost + sent_boost
     conf = max(0, min(conf, 100))
 
-    # v3.0 hard floor — no weak signals reach Telegram
+    # v4.0 STRICT: Hard floor 70 — only high-conviction signals pass
+    # Raised to 75 if consecutive same-direction rejects detected (choppy market)
     same_dir_rejects = sum(1 for d, _ in _reject_history[-5:] if d == direction)
-    min_conf = 62 if same_dir_rejects >= 3 else 55
+    min_conf = 75 if same_dir_rejects >= 3 else 70
     if conf < min_conf:
         _reject_history.append((direction, 0))
         return None
@@ -1049,10 +1050,11 @@ def print_signal(sig):
 def send_tg(sig):
     if not TG_TOKEN or not TG_CHAT or not sig:
         return
-    # v2.0: Only send A+ and A tier signals via Telegram
+    # v4.0 STRICT: Only A+ grade signals reach Telegram
+    # A+ requires: confidence >= 72 AND HTF regime confidence >= 60
     tier = sig.get('tier', 'B')
-    if tier == 'B':
-        print(s(f"  Telegram: skipped (tier {tier})", GY))
+    if tier != 'A+':
+        print(s(f"  Telegram: skipped (tier {tier} — only A+ sent)", GY))
         return
     em  = "🟢" if sig["dir"]=="LONG" else "🔴"
     tc  = "🏆" if tier == "A+" else "⚡"
