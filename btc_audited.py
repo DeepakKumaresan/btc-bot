@@ -1106,9 +1106,27 @@ def main():
     cron_mode = "--cron" in sys.argv
 
     if not cron_mode:
-        # Start keepalive server in background thread (for Render/UptimeRobot)
-        t = threading.Thread(target=_start_keepalive_server, daemon=True)
-        t.start()
+        # Thread 1: HTTP keepalive server so Render treats this as a web service
+        t1 = threading.Thread(target=_start_keepalive_server, daemon=True)
+        t1.start()
+
+        # Thread 2: Self-pinger — hits own public URL every 10 min to prevent sleep
+        # RENDER_EXTERNAL_URL is automatically set by Render for all web services
+        render_url = os.getenv("RENDER_EXTERNAL_URL", "")
+        if render_url:
+            def _self_ping():
+                print(s(f"  Self-ping active -> {render_url} (every 10 min)", GY))
+                while True:
+                    time.sleep(600)
+                    try:
+                        requests.get(render_url, timeout=10)
+                        print(s("  Self-ping OK", GY))
+                    except Exception as pe:
+                        print(s(f"  Self-ping warn: {pe}", GY))
+            t2 = threading.Thread(target=_self_ping, daemon=True)
+            t2.start()
+        else:
+            print(s("  Self-ping: local mode (no RENDER_EXTERNAL_URL)", GY))
 
     print_header()
     print(s(f"  Connecting to {EXCHANGE.upper()}...", GY), end="", flush=True)
