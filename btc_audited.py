@@ -63,10 +63,10 @@ RSI_OB         = 60
 RSI_OS         = 40
 RSI_EXTREME_OB = 68
 RSI_EXTREME_OS = 32
-ADX_MIN        = 16          # v4.0: lowered from 18 — catches trend earlier
+ADX_MIN        = 18
 VOL_MAX_WHALE  = 3.0
-VOL_MIN_SIGNAL = 0.8         # v4.0: lowered from 1.0 — more signals in normal vol
-SIGNAL_GAP     = 2           # v4.0: lowered from 4 — allows signals closer together
+VOL_MIN_SIGNAL = 1.0
+SIGNAL_GAP     = 4
 
 # ── Risk ───────────────────────────────────────────────────────
 SL_ATR   = 1.2
@@ -443,9 +443,9 @@ def mk_signal(direction, mode, price, atr, checks, reg, atr_avg=None, mtf_boost=
     conf = conf_score(checks, reg["confidence"], rr) + mtf_boost + sess_mod + smc_boost + sent_boost
     conf = max(0, min(conf, 100))
 
-    # v4.0 calibrated hard floor: strict enough to block noise, loose enough to fire
+    # v3.0 hard floor — no weak signals reach Telegram
     same_dir_rejects = sum(1 for d, _ in _reject_history[-5:] if d == direction)
-    min_conf = 58 if same_dir_rejects >= 3 else 48
+    min_conf = 62 if same_dir_rejects >= 3 else 55
     if conf < min_conf:
         _reject_history.append((direction, 0))
         return None
@@ -530,10 +530,9 @@ def m_trend(df15, df1h, reg):
             r1.close > r1.e50, r.flow > 0,
             r.high > df15["high"].iloc[-4:-2].max()
         ]
-        # v4.0: 7/10 checks required (was 8 — too strict for real market conditions)
-        if sum(int(b) for b in pb) >= 7:
+        if sum(int(b) for b in pb) >= 8:
             return mk_signal("LONG", "TREND PULLBACK", price, atr, pb, reg, atr_avg, smc=smc, sentiment=sentiment)
-        if sum(int(b) for b in bk) >= 7:
+        if sum(int(b) for b in bk) >= 8:
             return mk_signal("LONG", "TREND BREAKOUT", price, atr, bk, reg, atr_avg, smc=smc, sentiment=sentiment)
 
     if reg["type"] == "TRENDING_DOWN":
@@ -560,9 +559,9 @@ def m_trend(df15, df1h, reg):
             r1.close < r1.e50, r.flow < 0,
             r.low_ < df15["low"].iloc[-4:-2].min()
         ]
-        if sum(int(b) for b in pb) >= 7:
+        if sum(int(b) for b in pb) >= 8:
             return mk_signal("SHORT", "TREND PULLBACK", price, atr, pb, reg, atr_avg, smc=smc, sentiment=sentiment)
-        if sum(int(b) for b in bk) >= 7:
+        if sum(int(b) for b in bk) >= 8:
             return mk_signal("SHORT", "TREND BREAKOUT", price, atr, bk, reg, atr_avg, smc=smc, sentiment=sentiment)
 
     return None
