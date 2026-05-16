@@ -1,11 +1,14 @@
 services:
   - type: web
-    name: btc-signal-bot
-    env: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: python -u btc_audited.py
-    envVars:
-      - key: TG_TOKEN
-        value: 8775276870:AAGABvQ6PwtRgGPNbk3V4YX_A0eVXxpiWyo
-      - key: TG_CHAT
-        value: "998659643"
+      name: btc-apex-v5
+          env: python
+              buildCommand: pip install ccxt pandas numpy ta requests
+                  startCommand: python -u btc_apex_v5.py
+                      envVars:
+                            - key: TG_TOKEN
+                                    value: 8775276870:AAGABvQ6PwtRgGPNbk3V4YX_A0eVXxpiWyo
+                                          - key: TG_CHAT
+                                                  value: "998659643"
+                                                        - key: PORT
+                                                                value: "10000"
+                                                                
