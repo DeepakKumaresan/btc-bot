@@ -207,6 +207,8 @@ def ichimoku(df):
 
 # ── AUTO-FIBONACCI ────────────────────────────────────────────────────
 def get_fib_levels(df, lookback=50):
+    if len(df) < lookback + 2:
+        return {}
     window = df.iloc[-lookback:-2]
     sh = float(window.high.max())
     sl = float(window.low.min())
@@ -232,6 +234,8 @@ def near_fib(price, fib, pct=0.005):
 
 # ── WEINSTEIN STAGE ANALYSIS ──────────────────────────────────────────
 def weinstein_stage(df):
+    if len(df) < 205 or "e200" not in df or pd.isna(df["e200"].iloc[-2]) or pd.isna(df["e200"].iloc[-7]):
+        return 0  # Warmup / Unclear Stage
     r   = df.iloc[-2]
     r5  = df.iloc[-7]   # 5 bars ago for slope
     p   = r.close
@@ -378,6 +382,8 @@ def get_smc_signals(df, lookback=50):
 
 # ── WYCKOFF PHASE ─────────────────────────────────────────────────────
 def wyckoff_phase(df):
+    if len(df) < 35:
+        return "TRANSITION"
     r    = df.iloc[-2]
     win  = df.iloc[-30:-2]
     obv_up   = r.obv_slope > 0
@@ -784,12 +790,18 @@ def fetch_derivative_data(ex):
     oi = 0.0
     try:
         res_funding = ex.fetch_funding_rate(SYMBOL)
-        funding = float(res_funding.get("fundingRate", 0.0))
+        if isinstance(res_funding, dict):
+            fr_val = res_funding.get("fundingRate")
+            if fr_val is not None:
+                funding = float(fr_val)
     except Exception as e:
         print(s(f"  Error fetching funding rate: {e}", GY))
     try:
         res_oi = ex.fetch_open_interest(SYMBOL)
-        oi = float(res_oi.get("openInterestAmount", 0.0))
+        if isinstance(res_oi, dict):
+            oi_val = res_oi.get("openInterestAmount")
+            if oi_val is not None:
+                oi = float(oi_val)
     except Exception as e:
         print(s(f"  Error fetching open interest: {e}", GY))
     return funding, oi
