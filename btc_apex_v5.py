@@ -1012,32 +1012,24 @@ def _tg(msg):
 
 def send_signal_tg(sig, r1d, r4h):
     tier = sig["tier"]
-    em   = "🟢" if sig["dir"] == "LONG" else "🔴"
-    tc   = "🏆" if tier == "A+" else "⚡"
-    cf   = "🔥" if sig["conf"] >= 80 else ("⚡" if sig["conf"] >= 68 else "✅")
-    sent = sig.get("sentiment", {})
+    direction = sig["dir"]
+    score = sig["conf"]
     funding = sig.get("funding", 0.0)
     oi = sig.get("oi", 0.0)
     
     msg = (
-        f"{em} *BTC {sig['dir']} — TRIPLE SCREEN PRO v6.0*\n"
-        f"{tc} Grade: *{tier}*   {cf} Score: *{sig['conf']}/100*\n\n"
-        f"📊 *Confluence Matrix:*\n"
-        f"  1D Tide : `{sig['sc1d']}/100`\n"
-        f"  4H Wave : `{sig['sc4h']}/100`\n"
-        f"  15m Entry: `{sig['sc15']}/100`\n\n"
-        f"🏦 Funding: `{funding*100:+.4f}%` · OI: `{oi:,.0f} BTC`\n"
-        f"🕐 `{sig['session']}`   ⏱ `{sig['time']}`\n\n"
-        f"🎯 Entry  `${sig['entry']:,.1f}`\n"
-        f"🛑 Stop   `${sig['sl']:,.1f}`  ({sig['sl_mode']})\n"
-        f"💰 Target `${sig['tp']:,.1f}`\n"
-        f"⚖️ R:R    `{sig['rr']}:1`\n\n"
-        f"😱 Sentiment: `{sent.get('bias','NEUTRAL')} ({sent.get('value',50)})`\n\n"
-        f"🔒 _Anti-repaint · Confirmed candle · Institutional Edge_\n"
-        f"_Shared automatically with all subscribed traders._"
+        f"*TRADE ALERT: BTC {direction} ({tier}-Grade)*\n"
+        f"Confluence Score: {score}/100\n\n"
+        f"Entry Zone : ${sig['entry']:,.1f}\n"
+        f"Stop Loss  : ${sig['sl']:,.1f} ({sig['sl_mode']})\n"
+        f"Take Profit: ${sig['tp']:,.1f}\n"
+        f"Risk/Reward: {sig['rr']}:1\n\n"
+        f"Funding Rate: {funding*100:+.4f}% · Open Interest: {oi:,.0f} BTC\n"
+        f"Time: {sig['time']} UTC\n\n"
+        f"_Strict confluence signal. Execute with safe risk management._"
     )
     _tg(msg)
-    print(s(f"  ✅ Telegram sent: [{tier}] {sig['dir']} conf={sig['conf']}%", BGN, bold=True))
+    print(s(f"  ✅ Telegram sent: [{tier}] {direction} conf={score}%", BGN, bold=True))
 
 _last_hb = [0.0]
 
@@ -1327,12 +1319,6 @@ def run_cron(ex):
         else:
             print(s(f"  [CRON] ⚠️ Setup aligned but blocked by: {', '.join(skip_reasons)}", YL))
 
-    # ── Send status to Telegram EVERY scan (so user knows bot is live) ─
-    d1_em = "🟢" if dir1d=="LONG" else ("🔴" if dir1d=="SHORT" else "⚪")
-    c4_em = "✅" if sc4h >= MIN_4H else "⏳"
-    c15_em = "✅" if sc15 >= MIN_15M else "⏳"
-    fg_em  = "😱" if sent["value"] <= 25 else ("😨" if sent["value"] <= 40 else ("😐" if sent["value"] <= 60 else ("😀" if sent["value"] <= 80 else "🤑")))
-
     if not signal_fired:
         missing = []
         if dir1d == "NEUTRAL":      missing.append("1D: no clear direction yet")
@@ -1343,21 +1329,8 @@ def run_cron(ex):
         if sig is None and not missing: missing.append("R:R ratio too low for safe entry")
         if skip_signal:             missing.append(f"Gate Protection: {', '.join(skip_reasons)}")
 
-        miss_str = "\n".join(f"  • {m}" for m in missing) if missing else "  • Market not aligned"
-
-        status_msg = (
-            f"📡 *BTC APEX PRO — Scan Complete*\n"
-            f"🕐 `{now}`\n\n"
-            f"💰 Price: `${price:,.1f}`\n"
-            f"{fg_em} F&G: `{sent['value']}/100 — {sent['bias']}`\n"
-            f"🏦 Funding: `{funding*100:+.4f}%` · OI: `{oi:,.0f} BTC`\n"
-            f"📈 Trajectory Forecast: `{forecast_slope:+.2f}`\n\n"
-            f"*Screen Confluence:* 1D: {d1_em} · 4H: {c4_em} · 15m: {c15_em} · Blended: `{final}/100` (need {adp})\n\n"
-            f"⏳ *No signal yet. Details:*\n{miss_str}\n\n"
-            f"_Bot is alive. Type /scan or /stats in private chat._"
-        )
-        _tg(status_msg)
-        print(s("  [CRON] Status sent to Telegram", GY))
+        miss_str = ", ".join(missing) if missing else "Market not aligned"
+        print(s(f"  [CRON] No signal generated. Missing: {miss_str}", GY))
 
     return signal_fired
 
