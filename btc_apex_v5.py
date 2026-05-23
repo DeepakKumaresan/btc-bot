@@ -102,6 +102,8 @@ def fetch(ex, tf, retries=3):
 
 # ── INDICATORS ────────────────────────────────────────────────────────
 def ind(df):
+    if df is None or len(df) < 10:
+        return df
     c, h, l, v = df.close, df.high, df.low, df.volume
 
     for p in [9, 20, 50, 200]:
@@ -768,21 +770,25 @@ def get_adaptive_min():
 # ── SUBSCRIBER MANAGEMENT & MULTI-USER SHARE ──────────────────────────
 SUBSCRIBERS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "subscribers.json")
 
+_sub_lock = threading.Lock()
+
 def _load_subs():
-    try:
-        if os.path.exists(SUBSCRIBERS_FILE):
-            with open(SUBSCRIBERS_FILE) as f:
-                return list(set(json.load(f)))
-    except:
-        pass
-    return []
+    with _sub_lock:
+        try:
+            if os.path.exists(SUBSCRIBERS_FILE):
+                with open(SUBSCRIBERS_FILE) as f:
+                    return list(set(json.load(f)))
+        except:
+            pass
+        return []
 
 def _save_subs(subs):
-    try:
-        with open(SUBSCRIBERS_FILE, "w") as f:
-            json.dump(list(set(subs)), f)
-    except:
-        pass
+    with _sub_lock:
+        try:
+            with open(SUBSCRIBERS_FILE, "w") as f:
+                json.dump(list(set(subs)), f)
+        except:
+            pass
 
 def fetch_derivative_data(ex):
     """Fetches funding rate and open interest from CCXT."""
