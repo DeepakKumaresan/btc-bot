@@ -759,16 +759,237 @@ def get_adaptive_min():
 #  TELEGRAM
 # ══════════════════════════════════════════════════════════════════════
 
-def _tg(msg):
-    if not TG_TOKEN or not TG_CHAT:
-        return
+# ── SUBSCRIBER MANAGEMENT & MULTI-USER SHARE ──────────────────────────
+SUBSCRIBERS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "subscribers.json")
+
+def _load_subs():
+    try:
+        if os.path.exists(SUBSCRIBERS_FILE):
+            with open(SUBSCRIBERS_FILE) as f:
+                return list(set(json.load(f)))
+    except:
+        pass
+    return []
+
+def _save_subs(subs):
+    try:
+        with open(SUBSCRIBERS_FILE, "w") as f:
+            json.dump(list(set(subs)), f)
+    except:
+        pass
+
+def fetch_derivative_data(ex):
+    """Fetches funding rate and open interest from CCXT."""
+    funding = 0.0
+    oi = 0.0
+    try:
+        res_funding = ex.fetch_funding_rate(SYMBOL)
+        funding = float(res_funding.get("fundingRate", 0.0))
+    except Exception as e:
+        print(s(f"  Error fetching funding rate: {e}", GY))
+    try:
+        res_oi = ex.fetch_open_interest(SYMBOL)
+        oi = float(res_oi.get("openInterestAmount", 0.0))
+    except Exception as e:
+        print(s(f"  Error fetching open interest: {e}", GY))
+    return funding, oi
+
+def linear_regression_forecast(prices, period=15):
+    """Calculates linear regression slope to forecast price trajectory."""
+    if len(prices) < period:
+        return 0.0
+    y = np.array(prices[-period:])
+    x = np.arange(period)
+    x_mean = np.mean(x)
+    y_mean = np.mean(y)
+    num = np.sum((x - x_mean) * (y - y_mean))
+    den = np.sum((x - x_mean) ** 2)
+    if den == 0:
+        return 0.0
+    return num / den
+
+def check_whale_spike(df):
+    """Detects if the most recent closed candle has extreme volume or range."""
+    r = df.iloc[-2]
+    body = abs(r.close - r.open)
+    atr = r.atr if "atr" in r else body
+    vol_r = r.vol_r if "vol_r" in r else 1.0
+    if body > 3.0 * atr:
+        return True, f"Candle body expansion ({body:.1f} > 3.0*ATR)"
+    if vol_r > 3.0:
+        return True, f"Extreme volume spike ({vol_r:.1f}x normal)"
+    return False, None
+
+def broadcast_tg_all(msg):
+    subs = _load_subs()
+    # Add default primary chat
+    if TG_CHAT:
+        try:
+            subs.append(int(TG_CHAT))
+        except:
+            subs.append(TG_CHAT)
+    sent_chats = set()
+    for chat_id in subs:
+        if chat_id in sent_chats:
+            continue
+        try:
+            requests.post(
+                f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+                json={"chat_id": chat_id, "text": msg, "parse_mode": "Markdown"},
+                timeout=8)
+            sent_chats.add(chat_id)
+        except Exception as e:
+            print(f"Failed to broadcast to {chat_id}: {e}")
+
+_last_offset = [0]
+
+def _tg_direct(chat_id, msg):
     try:
         requests.post(
             f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
-            json={"chat_id": TG_CHAT, "text": msg, "parse_mode": "Markdown"},
+            json={"chat_id": chat_id, "text": msg, "parse_mode": "Markdown"},
             timeout=10)
+    except:
+        pass
+
+def _run_scan_for_user(ex, chat_id):
+    try:
+        df15 = ind(fetch(ex, TF_15M))
+        df1d = ind(fetch(ex, TF_1D))
+        df4h = ind(fetch(ex, TF_4H))
+        
+        price = float(df15.iloc[-1].close)
+        dir1d, sc1d, _ = analyze_1d(df1d)
+        
+        sc4h, _ = analyze_4h(df4h, dir1d) if dir1d != "NEUTRAL" else (0, [])
+        sc15, _ = analyze_15m(df15, dir1d) if dir1d != "NEUTRAL" and sc4h >= MIN_4H else (0, [])
+        
+        final = round(sc1d*0.30 + sc4h*0.35 + sc15*0.35)
+        adp = get_adaptive_min()
+        sent = get_sentiment()
+        funding, oi = fetch_derivative_data(ex)
+        
+        d1_em = "🟢" if dir1d=="LONG" else ("🔴" if dir1d=="SHORT" else "⚪")
+        c4_em = "✅" if sc4h >= MIN_4H else "⏳"
+        c15_em = "✅" if sc15 >= MIN_15M else "⏳"
+        
+        report = (
+            f"📊 *BTC Real-time Market Scan Report*\n\n"
+            f"💰 Price: `${price:,.1f}`\n"
+            f"😱 F&G: `{sent['value']}/100 — {sent['bias']}`\n"
+            f"🏦 Funding: `{funding*100:+.4f}%` · OI: `{oi:,.0f} BTC`\n\n"
+            f"*Timeframe Analysis:*\n"
+            f"{d1_em} 1D Trend Tide: `{sc1d}/100` — {dir1d}\n"
+            f"{c4_em} 4H Wave Setup: `{sc4h}/100` (need {MIN_4H})\n"
+            f"{c15_em} 15m Entry Trigger: `{sc15}/100` (need {MIN_15M})\n"
+            f"📊 Blended Confluence: `{final}/100` (need {adp})\n\n"
+            f"_Trade with institutional edge._"
+        )
+        _tg_direct(chat_id, report)
     except Exception as e:
-        print(s(f"  TG error: {e}", GY))
+        _tg_direct(chat_id, f"❌ *Error running scan:* `{e}`")
+
+def _tg_listener_loop(ex):
+    if not TG_TOKEN:
+        return
+    print(s("  Telegram command listener daemon started...", GY))
+    subs = _load_subs()
+    if TG_CHAT:
+        try:
+            if int(TG_CHAT) not in subs:
+                subs.append(int(TG_CHAT))
+                _save_subs(subs)
+        except:
+            pass
+
+    while True:
+        try:
+            url = f"https://api.telegram.org/bot{TG_TOKEN}/getUpdates"
+            params = {"timeout": 20}
+            if _last_offset[0] > 0:
+                params["offset"] = _last_offset[0]
+            
+            r = requests.get(url, params=params, timeout=25)
+            if r.status_code != 200:
+                time.sleep(5)
+                continue
+                
+            res = r.json()
+            if not res.get("ok"):
+                time.sleep(5)
+                continue
+                
+            for update in res.get("result", []):
+                _last_offset[0] = update["update_id"] + 1
+                msg = update.get("message", {})
+                chat = msg.get("chat", {})
+                chat_id = chat.get("id")
+                text = msg.get("text", "").strip().lower()
+                username = msg.get("from", {}).get("first_name", "Trader Friend")
+                
+                if not chat_id or not text:
+                    continue
+                    
+                if text == "/start" or text == "/subscribe":
+                    subs = _load_subs()
+                    if chat_id not in subs:
+                        subs.append(chat_id)
+                        _save_subs(subs)
+                    welcome_msg = (
+                        f"👋 *Welcome {username} to BTC APEX PRO v6.0!*\n\n"
+                        f"🥇 You are now subscribed to the *world's #1 trading signals bot*.\n"
+                        f"📈 You will receive highly accurate, verified, A-grade BTC setups directly here.\n\n"
+                        f"👉 *Available Commands:*\n"
+                        f"  • `/scan` — Trigger instant real-time market scan\n"
+                        f"  • `/stats` — View bot performance and win rate\n"
+                        f"  • `/unsubscribe` — Stop receiving private signals"
+                    )
+                    _tg_direct(chat_id, welcome_msg)
+                    
+                elif text == "/unsubscribe":
+                    subs = _load_subs()
+                    if chat_id in subs:
+                        subs.remove(chat_id)
+                        _save_subs(subs)
+                    _tg_direct(chat_id, "❌ *Unsubscribed successfully.* You will no longer receive private signals. Good luck!")
+                    
+                elif text == "/stats" or text == "/performance":
+                    perf = get_performance()
+                    if perf:
+                        wrc = "🟢" if perf["wr"] >= 60 else ("🟡" if perf["wr"] >= 45 else "🔴")
+                        stats_msg = (
+                            f"📈 *BTC APEX PRO — Performance Report*\n\n"
+                            f"📊 Trades logged: `{perf['n']}`\n"
+                            f"🏆 Wins (TP hit): `{perf['wins']}`\n"
+                            f"❌ Losses (SL hit): `{perf['losses']}`\n"
+                            f"{wrc} Win Rate:  `{perf['wr']}%`\n"
+                            f"⚖️ Profit Factor: `{perf['pf']}`\n\n"
+                            f"_Keep growing your portfolio safely!_"
+                        )
+                    else:
+                        stats_msg = "ℹ️ *No completed trades logged yet.* Performance data will display after a few signals hit TP or SL."
+                    _tg_direct(chat_id, stats_msg)
+                    
+                elif text == "/scan":
+                    _tg_direct(chat_id, "🔍 *Scouting Bitcoin markets...* running real-time multi-timeframe analysis.")
+                    threading.Thread(target=_run_scan_for_user, args=(ex, chat_id), daemon=True).start()
+                    
+                elif text == "/help":
+                    help_msg = (
+                        f"🤖 *BTC APEX PRO v6.0 Help Menu*\n\n"
+                        f"Available commands:\n"
+                        f"⚡ `/scan` — Real-time multi-timeframe cascade analysis\n"
+                        f"📈 `/stats` — Performance statistics and closed trade records\n"
+                        f"🔔 `/subscribe` — Receive live trading signals in this chat\n"
+                        f"🔕 `/unsubscribe` — Unsubscribe from signals"
+                    )
+                    _tg_direct(chat_id, help_msg)
+        except Exception as e:
+            time.sleep(5)
+
+# ── TELEGRAM API INTERACTION ──────────────────────────────────────────
+def _tg(msg):
+    broadcast_tg_all(msg)
 
 def send_signal_tg(sig, r1d, r4h):
     tier = sig["tier"]
@@ -776,21 +997,25 @@ def send_signal_tg(sig, r1d, r4h):
     tc   = "🏆" if tier == "A+" else "⚡"
     cf   = "🔥" if sig["conf"] >= 80 else ("⚡" if sig["conf"] >= 68 else "✅")
     sent = sig.get("sentiment", {})
+    funding = sig.get("funding", 0.0)
+    oi = sig.get("oi", 0.0)
+    
     msg = (
-        f"{em} *BTC {sig['dir']} — TRIPLE SCREEN v5.0*\n"
+        f"{em} *BTC {sig['dir']} — TRIPLE SCREEN PRO v6.0*\n"
         f"{tc} Grade: *{tier}*   {cf} Score: *{sig['conf']}/100*\n\n"
-        f"📊 *Screen Scores:*\n"
+        f"📊 *Confluence Matrix:*\n"
         f"  1D Tide : `{sig['sc1d']}/100`\n"
         f"  4H Wave : `{sig['sc4h']}/100`\n"
         f"  15m Entry: `{sig['sc15']}/100`\n\n"
+        f"🏦 Funding: `{funding*100:+.4f}%` · OI: `{oi:,.0f} BTC`\n"
         f"🕐 `{sig['session']}`   ⏱ `{sig['time']}`\n\n"
         f"🎯 Entry  `${sig['entry']:,.1f}`\n"
         f"🛑 Stop   `${sig['sl']:,.1f}`  ({sig['sl_mode']})\n"
         f"💰 Target `${sig['tp']:,.1f}`\n"
         f"⚖️ R:R    `{sig['rr']}:1`\n\n"
         f"😱 Sentiment: `{sent.get('bias','NEUTRAL')} ({sent.get('value',50)})`\n\n"
-        f"🔒 _Anti-repaint · Confirmed candle · Set TP/SL FIRST_\n"
-        f"_1D→4H→15m all aligned. You decide the trade._"
+        f"🔒 _Anti-repaint · Confirmed candle · Institutional Edge_\n"
+        f"_Shared automatically with all subscribed traders._"
     )
     _tg(msg)
     print(s(f"  ✅ Telegram sent: [{tier}] {sig['dir']} conf={sig['conf']}%", BGN, bold=True))
@@ -805,12 +1030,12 @@ def send_startup():
     adp   = get_adaptive_min()
     aline = f"  Min score: `{adp}` (adaptive)" if adp != MIN_TOTAL else f"  Min score: `{MIN_TOTAL}`"
     _tg(
-        f"🚀 *BTC APEX v5.0 — ONLINE*\n"
+        f"🚀 *BTC APEX PRO v6.0 — ONLINE*\n"
         f"⚙️ Exchange: `{EXCHANGE.upper()}` · Symbol: `{SYMBOL}`\n"
-        f"📊 Strategy: 1D→4H→15m Triple Screen\n"
+        f"📊 Strategy: 1D→4H→15m Triple Screen Cascade\n"
         f"🕐 `{datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}`\n"
         f"{aline}{pline}\n"
-        f"_Scanning every 60s. Signals fire when ALL 3 screens align._"
+        f"_Interactive listener active. Friends can type /subscribe for signals!_"
     )
 
 def send_heartbeat():
@@ -827,11 +1052,11 @@ def send_heartbeat():
                  f"WR `{perf['wr']}%` · PF `{perf['pf']}`")
     boost = f" (+{_adaptive_boost[0]} adaptive)" if _adaptive_boost[0] else ""
     _tg(
-        f"💓 *BTC APEX Heartbeat*\n"
+        f"💓 *BTC APEX PRO Heartbeat*\n"
         f"✅ Bot alive · Min score: `{adp}`{boost}\n"
         f"🕐 `{datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}`"
         f"{pline}\n"
-        f"_Scanning 1D→4H→15m every 60s. No signal = conditions not met._"
+        f"_Listening for Telegram commands. Signals broadcast automatically._"
     )
 
 def notify_outcome(sig_id, outcome, pnl):
@@ -1007,7 +1232,7 @@ def run_cron(ex):
     """
     GitHub Actions scan — runs every 15 min.
     ALWAYS sends Telegram so user knows bot is running.
-    Sends full signal when all 3 screens align.
+    Sends A-grade signals when all 3 screens and derivative gates align.
     """
     print(s("  [CRON] Starting scan...", CY))
     df15 = ind(fetch(ex, TF_15M))
@@ -1019,6 +1244,15 @@ def run_cron(ex):
     r15   = df15.iloc[-2]
     sent  = get_sentiment()
     now   = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+
+    # Fetch derivative data streams (Whale Activity)
+    funding, oi = fetch_derivative_data(ex)
+    
+    # Volatility Spike Protection
+    is_spike, spike_reason = check_whale_spike(df15)
+
+    # Linear Regression Price Trend Forecasting (15 period)
+    forecast_slope = linear_regression_forecast(df15.close.tolist(), 15)
 
     dir1d, sc1d, r1d = analyze_1d(df1d)
 
@@ -1034,20 +1268,45 @@ def run_cron(ex):
     adp   = get_adaptive_min()
 
     print(s(f"  ${price:,.1f}  1D:{dir1d}({sc1d})  4H:{sc4h}  15m:{sc15}  Final:{final}/{adp}", GY))
-    print(s(f"  F&G:{sent['value']} {sent['bias']}  RR_min:{MIN_RR}", GY))
+    print(s(f"  F&G:{sent['value']} {sent['bias']}  Funding:{funding*100:+.4f}%  OI:{oi:,.0f} BTC  Slope:{forecast_slope:+.4f}", GY))
+
+    # Apply protection gates
+    skip_signal = False
+    skip_reasons = []
+    
+    if is_spike:
+        skip_signal = True
+        skip_reasons.append(f"Whale Volatility Protection ({spike_reason})")
+    if funding > 0.0025 and dir1d == "LONG":
+        skip_signal = True
+        skip_reasons.append(f"Overleveraged longs (Funding {funding*100:+.4f}%)")
+    if funding < -0.0025 and dir1d == "SHORT":
+        skip_signal = True
+        skip_reasons.append(f"Overleveraged shorts (Funding {funding*100:+.4f}%)")
+    if dir1d == "LONG" and forecast_slope < -5.0:
+        skip_signal = True
+        skip_reasons.append(f"Forecasting downward momentum ({forecast_slope:+.2f})")
+    if dir1d == "SHORT" and forecast_slope > 5.0:
+        skip_signal = True
+        skip_reasons.append(f"Forecasting upward momentum ({forecast_slope:+.2f})")
 
     # ── Check if signal fires ─────────────────────────────────────────
     signal_fired = False
     sig = None
 
     if (dir1d != "NEUTRAL" and sc1d >= MIN_1D and sc4h >= MIN_4H and sc15 >= MIN_15M):
-        sig = build_signal(dir1d, df15, sc1d, sc4h, sc15, sent)
-        if sig:
-            print_signal(sig, r1d, r4h, r15r)
-            send_signal_tg(sig, r1d, r4h)
-            log_signal(sig)
-            print(s(f"  [CRON] ✅ SIGNAL FIRED: {sig['dir']} conf={sig['conf']}%", BGN, bold=True))
-            signal_fired = True
+        if not skip_signal:
+            sig = build_signal(dir1d, df15, sc1d, sc4h, sc15, sent)
+            if sig:
+                sig["funding"] = funding
+                sig["oi"] = oi
+                print_signal(sig, r1d, r4h, r15r)
+                send_signal_tg(sig, r1d, r4h)
+                log_signal(sig)
+                print(s(f"  [CRON] ✅ SIGNAL FIRED: {sig['dir']} conf={sig['conf']}%", BGN, bold=True))
+                signal_fired = True
+        else:
+            print(s(f"  [CRON] ⚠️ Setup aligned but blocked by: {', '.join(skip_reasons)}", YL))
 
     # ── Send status to Telegram EVERY scan (so user knows bot is live) ─
     d1_em = "🟢" if dir1d=="LONG" else ("🔴" if dir1d=="SHORT" else "⚪")
@@ -1056,7 +1315,6 @@ def run_cron(ex):
     fg_em  = "😱" if sent["value"] <= 25 else ("😨" if sent["value"] <= 40 else ("😐" if sent["value"] <= 60 else ("😀" if sent["value"] <= 80 else "🤑")))
 
     if not signal_fired:
-        # Show what's missing
         missing = []
         if dir1d == "NEUTRAL":      missing.append("1D: no clear direction yet")
         elif sc1d < MIN_1D:         missing.append(f"1D: {sc1d}/{MIN_1D} (weak trend)")
@@ -1064,27 +1322,25 @@ def run_cron(ex):
         if sc15 < MIN_15M:          missing.append(f"15m: {sc15}/{MIN_15M} (no entry trigger)")
         if final < adp and not missing: missing.append(f"Score: {final}/{adp} (needs {adp})")
         if sig is None and not missing: missing.append("R:R ratio too low for safe entry")
+        if skip_signal:             missing.append(f"Gate Protection: {', '.join(skip_reasons)}")
 
         miss_str = "\n".join(f"  • {m}" for m in missing) if missing else "  • Market not aligned"
 
         status_msg = (
-            f"📡 *BTC APEX — Scan Complete*\n"
+            f"📡 *BTC APEX PRO — Scan Complete*\n"
             f"🕐 `{now}`\n\n"
             f"💰 Price: `${price:,.1f}`\n"
-            f"{fg_em} F&G: `{sent['value']}/100 — {sent['bias']}`\n\n"
-            f"*Screen Scores:*\n"
-            f"{d1_em} 1D Tide:  `{sc1d}/100` {'✅' if sc1d>=MIN_1D else '❌'} (need {MIN_1D}) — {dir1d}\n"
-            f"{c4_em} 4H Wave:  `{sc4h}/100` {'✅' if sc4h>=MIN_4H else '❌'} (need {MIN_4H})\n"
-            f"{c15_em} 15m Entry: `{sc15}/100` {'✅' if sc15>=MIN_15M else '❌'} (need {MIN_15M})\n"
-            f"📊 Final:   `{final}/100` (need {adp})\n\n"
-            f"⏳ *No signal yet. Missing:*\n{miss_str}\n\n"
-            f"_Bot is alive. Scanning every 15 min._"
+            f"{fg_em} F&G: `{sent['value']}/100 — {sent['bias']}`\n"
+            f"🏦 Funding: `{funding*100:+.4f}%` · OI: `{oi:,.0f} BTC`\n"
+            f"📈 Trajectory Forecast: `{forecast_slope:+.2f}`\n\n"
+            f"*Screen Confluence:* 1D: {d1_em} · 4H: {c4_em} · 15m: {c15_em} · Blended: `{final}/100` (need {adp})\n\n"
+            f"⏳ *No signal yet. Details:*\n{miss_str}\n\n"
+            f"_Bot is alive. Type /scan or /stats in private chat._"
         )
         _tg(status_msg)
         print(s("  [CRON] Status sent to Telegram", GY))
 
     return signal_fired
-
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1114,6 +1370,10 @@ def main():
     # ── Continuous mode: laptop or Render background worker ──────────
     # Start keepalive HTTP server (UptimeRobot / Render compatibility)
     threading.Thread(target=_start_server, daemon=True).start()
+    
+    # Start Telegram background listener daemon
+    threading.Thread(target=_tg_listener_loop, args=(ex,), daemon=True).start()
+    
     send_startup()
     print(s(f"  Mode: CONTINUOUS (scanning every 60s)\n", GY))
 
@@ -1130,6 +1390,15 @@ def main():
 
             price = float(df15.iloc[-1].close)
             sent  = get_sentiment()
+
+            # Fetch derivative data streams
+            funding, oi = fetch_derivative_data(ex)
+            
+            # Whale Spike protection
+            is_spike, spike_reason = check_whale_spike(df15)
+
+            # Linear Regression trend forecasting (15 period)
+            forecast_slope = linear_regression_forecast(df15.close.tolist(), 15)
 
             # Notify resolved backtest outcomes
             for entry in check_outcomes(df15):
@@ -1158,12 +1427,22 @@ def main():
                 sc1d >= MIN_1D and sc4h >= MIN_4H and sc15 >= MIN_15M and
                 (idx - last_sig_candle) >= COOLDOWN):
 
-                sig = build_signal(dir1d, df15, sc1d, sc4h, sc15, sent)
-                if sig:
-                    print_signal(sig, r1d, r4h, r15)
-                    send_signal_tg(sig, r1d, r4h)
-                    log_signal(sig)
-                    last_sig_candle = idx
+                # Apply protection gates
+                skip_signal = False
+                if is_spike or (funding > 0.0025 and dir1d == "LONG") or (funding < -0.0025 and dir1d == "SHORT"):
+                    skip_signal = True
+                if (dir1d == "LONG" and forecast_slope < -5.0) or (dir1d == "SHORT" and forecast_slope > 5.0):
+                    skip_signal = True
+
+                if not skip_signal:
+                    sig = build_signal(dir1d, df15, sc1d, sc4h, sc15, sent)
+                    if sig:
+                        sig["funding"] = funding
+                        sig["oi"] = oi
+                        print_signal(sig, r1d, r4h, r15)
+                        send_signal_tg(sig, r1d, r4h)
+                        log_signal(sig)
+                        last_sig_candle = idx
 
             if loop % 5 == 0:
                 print_tracker(dir1d, sc1d, sc4h, sc15, get_adaptive_min())
