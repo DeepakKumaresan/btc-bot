@@ -63,10 +63,10 @@ RSI_OB         = 60
 RSI_OS         = 40
 RSI_EXTREME_OB = 68
 RSI_EXTREME_OS = 32
-ADX_MIN        = 18
+ADX_MIN        = 15           # was 18 — more inclusive trending/ranging detection
 VOL_MAX_WHALE  = 3.0
 VOL_MIN_SIGNAL = 1.0
-SIGNAL_GAP     = 4
+SIGNAL_GAP     = 2            # was 4 — signals every 30min instead of 1hr
 
 # ── Risk ───────────────────────────────────────────────────────
 SL_ATR   = 1.2
@@ -140,11 +140,21 @@ def connect():
     ex = getattr(ccxt, nm)({"enableRateLimit": True, "options": opts})
     return ex
 
-def fetch(ex, tf):
-    raw = ex.fetch_ohlcv(SYMBOL, tf, limit=LIMIT)
-    df  = pd.DataFrame(raw, columns=["ts","open","high","low","close","volume"])
-    df["ts"] = pd.to_datetime(df["ts"], unit="ms")
-    return df.set_index("ts").astype(float)
+def fetch(ex, tf, retries=3):
+    """Fetch OHLCV with automatic retry on network errors."""
+    for attempt in range(retries):
+        try:
+            raw = ex.fetch_ohlcv(SYMBOL, tf, limit=LIMIT)
+            df  = pd.DataFrame(raw, columns=["ts","open","high","low","close","volume"])
+            df["ts"] = pd.to_datetime(df["ts"], unit="ms")
+            return df.set_index("ts").astype(float)
+        except Exception as e:
+            if attempt < retries - 1:
+                wait = 5 * (attempt + 1)
+                print(s(f"  fetch({tf}) error (attempt {attempt+1}): {e} — retry in {wait}s", YL))
+                time.sleep(wait)
+            else:
+                raise
 
 # ═══════════════════════════════════════════════════════════════
 #  INDICATORS
@@ -344,7 +354,8 @@ def regime(df15, df1h, df4h):
 
     # ── TREND UP (v3.0 HTF Veto & Slope) ───────────────────────
     slope_up = r.e50 > r_p.e50
-    htf_bull = (r1h.close > r1h.e50) and (r4h.close > r4h.e200)
+    # FIX: OR logic — either 1H or 4H must confirm (was AND, too strict)
+    htf_bull = (r1h.close > r1h.e50) or (r4h.close > r4h.e200)
 
     if slope_up and htf_bull:
         up = int(p > r.e200) + int(p > r.e50) + int(r.e9 > r.e20) + \
@@ -355,7 +366,8 @@ def regime(df15, df1h, df4h):
 
     # ── TREND DOWN (v3.0 HTF Veto & Slope) ─────────────────────
     slope_dn = r.e50 < r_p.e50
-    htf_bear = (r1h.close < r1h.e50) and (r4h.close < r4h.e200)
+    # FIX: OR logic — either 1H or 4H must confirm (was AND, too strict)
+    htf_bear = (r1h.close < r1h.e50) or (r4h.close < r4h.e200)
 
     if slope_dn and htf_bear:
         dn = int(p < r.e200) + int(p < r.e50) + int(r.e9 < r.e20) + \
@@ -444,19 +456,18 @@ def mk_signal(direction, mode, price, atr, checks, reg, atr_avg=None, mtf_boost=
     conf = conf_score(checks, reg["confidence"], rr) + mtf_boost + sess_mod + smc_boost + sent_boost
     conf = max(0, min(conf, 100))
 
-    # v4.0 FINAL: Hard confidence floor — 65 minimum, 73 if on rejection streak
-    same_dir_rejects = sum(1 for d, _ in _reject_history[-5:] if d == direction)
-    min_conf = 73 if same_dir_rejects >= 3 else 65
+    # FIX: Lowered floor to 52 (was 65/73) — stop blocking valid signals
+    min_conf = 52
     if conf < min_conf:
-        _reject_history.append((direction, 0))
         return None
 
-    # v4.0 FINAL: Quality tier — only A+ reaches Telegram
-    htf_ok = reg["confidence"] >= 60
-    if conf >= 72 and htf_ok:
+    # Quality tier — A+ (highest conviction) and A (solid) both reach Telegram
+    # B is blocked
+    htf_ok = reg["confidence"] >= 50   # was 60, too strict
+    if conf >= 68 and htf_ok:
         tier = "A+"
-    elif conf >= 65:
-        tier = "A"    # tracked internally, NOT sent to Telegram
+    elif conf >= 55:
+        tier = "A"    # also sent to Telegram
     else:
         tier = "B"    # blocked
 
@@ -531,9 +542,9 @@ def m_trend(df15, df1h, reg):
             r1.close > r1.e50, r.flow > 0,
             r.high > df15["high"].iloc[-4:-2].max()
         ]
-        if sum(int(b) for b in pb) >= 8:
+        if sum(int(b) for b in pb) >= 7:   # was 8 — too strict
             return mk_signal("LONG", "TREND PULLBACK", price, atr, pb, reg, atr_avg, smc=smc, sentiment=sentiment)
-        if sum(int(b) for b in bk) >= 8:
+        if sum(int(b) for b in bk) >= 7:   # was 8 — too strict
             return mk_signal("LONG", "TREND BREAKOUT", price, atr, bk, reg, atr_avg, smc=smc, sentiment=sentiment)
 
     if reg["type"] == "TRENDING_DOWN":
@@ -560,9 +571,9 @@ def m_trend(df15, df1h, reg):
             r1.close < r1.e50, r.flow < 0,
             r.low_ < df15["low"].iloc[-4:-2].min()
         ]
-        if sum(int(b) for b in pb) >= 8:
+        if sum(int(b) for b in pb) >= 7:   # was 8 — too strict
             return mk_signal("SHORT", "TREND PULLBACK", price, atr, pb, reg, atr_avg, smc=smc, sentiment=sentiment)
-        if sum(int(b) for b in bk) >= 8:
+        if sum(int(b) for b in bk) >= 7:   # was 8 — too strict
             return mk_signal("SHORT", "TREND BREAKOUT", price, atr, bk, reg, atr_avg, smc=smc, sentiment=sentiment)
 
     return None
@@ -582,7 +593,7 @@ def m_rejection(df15, reg):
     d_vwap = abs(price - r.vwap) / price
     d_200  = abs(price - r.e200) / price
     d_50   = abs(price - r.e50) / price
-    if min(d_vwap, d_200, d_50) > 0.005: 
+    if min(d_vwap, d_200, d_50) > 0.015:   # was 0.005 (0.5%) — too tight for BTC
         return None
 
     sc = [
@@ -605,10 +616,10 @@ def m_rejection(df15, reg):
         r.flow > 0,
         bool(r.bull_engulf),
     ]
-    # v3.0: Require 6/8 instead of 5/8
-    if sum(int(b) for b in sc) >= 6:
+    # FIX: 5/8 (was 6/8) — rejection mode was too rare to ever fire
+    if sum(int(b) for b in sc) >= 5:
         return mk_signal("SHORT", "REJECTION", price, atr, sc, reg, atr_avg)
-    if sum(int(b) for b in lc) >= 6:
+    if sum(int(b) for b in lc) >= 5:
         return mk_signal("LONG",  "REJECTION", price, atr, lc, reg, atr_avg)
     return None
 
@@ -793,7 +804,7 @@ def m_structure(df15, df1h, reg):
             r1h.close > r1h.e50,        # 1H HTF confirmation
             r.macdh > r.macdh1,         # MACD histogram rising
         ]
-        if sum(int(b) for b in checks) >= 7:
+        if sum(int(b) for b in checks) >= 6:   # was 7
             return mk_signal("LONG",  "STRUCTURE BREAK", price, atr, checks, reg, atr_avg)
     if bear_break:
         checks = [
@@ -807,7 +818,7 @@ def m_structure(df15, df1h, reg):
             r1h.close < r1h.e50,
             r.macdh < r.macdh1,
         ]
-        if sum(int(b) for b in checks) >= 7:
+        if sum(int(b) for b in checks) >= 6:   # was 7
             return mk_signal("SHORT", "STRUCTURE BREAK", price, atr, checks, reg, atr_avg)
     return None
 
@@ -1047,17 +1058,27 @@ def print_signal(sig):
 #  TELEGRAM
 # ═══════════════════════════════════════════════════════════════
 
+def _tg_post(msg):
+    """Raw Telegram post helper."""
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+            json={"chat_id": TG_CHAT, "text": msg, "parse_mode": "Markdown"},
+            timeout=10)
+    except Exception as e:
+        print(s(f"  Telegram send error: {e}", GY))
+
 def send_tg(sig):
     if not TG_TOKEN or not TG_CHAT or not sig:
         return
     tier = sig.get('tier', 'B')
-    # v4.0 FINAL: Only A+ signals reach Telegram — most powerful trades only
-    if tier != 'A+':
-        print(s(f"  Telegram: skipped (tier {tier}, need A+)", GY))
+    # FIX: Send BOTH A+ and A tier — was sending only A+ (blocked too many signals)
+    if tier == 'B':
+        print(s(f"  Telegram: skipped (tier B — conf too low)", GY))
         return
     em  = "🟢" if sig["dir"]=="LONG" else "🔴"
     tc  = "🏆" if tier == "A+" else "⚡"
-    cc  = "🔥" if sig["conf"]>=70 else ("⚡" if sig["conf"]>=50 else "⚠️")
+    cc  = "🔥" if sig["conf"]>=70 else ("⚡" if sig["conf"]>=55 else "⚠️")
     msg = (f"{em} *BTC {sig['dir']} — {sig['mode']}*\n"
            f"{tc} Grade: *{tier}*   {cc} Confidence: *{sig['conf']}%*\n\n"
            f"📍 `{sig['regime']}`   🕐 `{sig.get('session','')}`\n"
@@ -1069,13 +1090,36 @@ def send_tg(sig):
            f"✅ Checks `{sig['passed']}/{sig['total']}`\n\n"
            f"🔒 _Anti-repaint: confirmed candle signal._\n"
            f"_Set TP/SL BEFORE entering. You decide._")
-    try:
-        requests.post(
-            f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
-            json={"chat_id": TG_CHAT, "text": msg, "parse_mode": "Markdown"},
-            timeout=10)
-    except Exception as e:
-        print(s(f"  Telegram: {e}", GY))
+    _tg_post(msg)
+    print(s(f"  ✅ Telegram sent: [{tier}] {sig['dir']} conf={sig['conf']}%", BGN))
+
+# ── Startup & Heartbeat ───────────────────────────────────────
+_last_heartbeat = [0.0]
+
+def send_startup():
+    """Notify Telegram that the bot has started/restarted."""
+    if not TG_TOKEN or not TG_CHAT:
+        return
+    msg = (f"🚀 *BTC Signal Bot — ONLINE*\n"
+           f"⚙️ Exchange: `{EXCHANGE.upper()}`   Symbol: `{SYMBOL}`\n"
+           f"🕐 `{datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}`\n"
+           f"✅ Scanning every 60s · Min conf: 52 · Sending A & A+ tiers\n"
+           f"_Signals fire when market conditions align. Standby..._")
+    _tg_post(msg)
+
+def send_heartbeat():
+    """Send heartbeat every 2 hours so you know the bot is alive."""
+    if not TG_TOKEN or not TG_CHAT:
+        return
+    now = time.time()
+    if now - _last_heartbeat[0] < 7200:   # 2 hours
+        return
+    _last_heartbeat[0] = now
+    msg = (f"💓 *BTC Bot Heartbeat*\n"
+           f"✅ Bot alive and scanning\n"
+           f"🕐 `{datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}`\n"
+           f"_No signal yet — market conditions not met. Still watching._")
+    _tg_post(msg)
 
 # ═══════════════════════════════════════════════════════════════
 #  KEEPALIVE WEB SERVER (Render/UptimeRobot anti-sleep trick)
@@ -1107,33 +1151,18 @@ def main():
     cron_mode = "--cron" in sys.argv
 
     if not cron_mode:
-        # Thread 1: HTTP keepalive server so Render treats this as a web service
+        # HTTP keepalive server — useful for UptimeRobot pings even on worker mode
         t1 = threading.Thread(target=_start_keepalive_server, daemon=True)
         t1.start()
-
-        # Thread 2: Self-pinger — hits own public URL every 10 min to prevent sleep
-        # RENDER_EXTERNAL_URL is automatically set by Render for all web services
-        render_url = os.getenv("RENDER_EXTERNAL_URL", "")
-        if render_url:
-            def _self_ping():
-                print(s(f"  Self-ping active -> {render_url} (every 10 min)", GY))
-                while True:
-                    time.sleep(600)
-                    try:
-                        requests.get(render_url, timeout=10)
-                        print(s("  Self-ping OK", GY))
-                    except Exception as pe:
-                        print(s(f"  Self-ping warn: {pe}", GY))
-            t2 = threading.Thread(target=_self_ping, daemon=True)
-            t2.start()
-        else:
-            print(s("  Self-ping: local mode (no RENDER_EXTERNAL_URL)", GY))
 
     print_header()
     print(s(f"  Connecting to {EXCHANGE.upper()}...", GY), end="", flush=True)
     ex = connect()
     print(s(" connected.", BGN))
-    
+
+    # Notify Telegram that bot started/restarted
+    send_startup()
+
     if cron_mode:
         print(s("  Running in CRON mode (single execution).", CY))
         try:
@@ -1142,7 +1171,6 @@ def main():
             df4h = ind(fetch(ex, TF_4H))
             reg  = regime(df15, df1h, df4h)
 
-            # v4.0: Fetch sentiment once per cron run
             sent = get_sentiment()
             print(s(f"  Sentiment: {sent['bias']} ({sent['value']}) — {sent['label']}", CY))
 
@@ -1162,9 +1190,7 @@ def main():
 
     print(s("  Scanning every 60s. Tracker prints every 5 min.\n", GY))
 
-    # FIX #5: track last signal by actual candle index, not loop count
     last_sig_candle = -SIGNAL_GAP
-    # FIX #7: start at 1 so tracker doesn't fire on first (unsettled) loop
     loop_count = 1
 
     while True:
@@ -1178,7 +1204,6 @@ def main():
 
             print_status(df15, df1h, df4h, reg)
 
-            # FIX #5: use actual candle index gap
             candle_gap_ok = (idx - last_sig_candle) >= SIGNAL_GAP
 
             if candle_gap_ok:
@@ -1187,11 +1212,13 @@ def main():
                     print_signal(sig)
                     send_tg(sig)
                     last_sig_candle = idx
-                    _reject_history.clear()    # v2.0: reset on successful signal
+                    _reject_history.clear()
                 else:
-                    # Tracker every 5 loops (= ~5 minutes)
                     if loop_count % 5 == 0:
                         print_tracker(df15, df1h, reg)
+
+            # Heartbeat every 2 hours — proves bot is alive even with no signals
+            send_heartbeat()
 
             loop_count += 1
             time.sleep(60)
@@ -1204,8 +1231,13 @@ def main():
             print()
             break
         except Exception as e:
-            print(s(f"  Error: {e} — retrying in 30s", RD))
-            time.sleep(30)
+            print(s(f"  Error: {e} — retrying in 15s", RD))
+            time.sleep(15)
+            # Reconnect exchange on error (handles stale connections)
+            try:
+                ex = connect()
+            except Exception:
+                pass
 
 if __name__ == "__main__":
     main()
