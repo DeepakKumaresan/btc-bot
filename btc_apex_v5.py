@@ -659,7 +659,7 @@ def analyze_15m(df15, direction):
 #  SIGNAL BUILDER
 # ══════════════════════════════════════════════════════════════════════
 
-def build_signal(direction, df15, sc1d, sc4h, sc15, sentiment):
+def build_signal(direction, df15, sc1d, sc4h, sc15, sentiment, reasons_1d=[], reasons_4h=[], reasons_15m=[], forecast_slope=0.0):
     r     = df15.iloc[-2]
     atr   = r.atr
     aavg  = r.atr_avg if r.atr_avg > 0 else atr
@@ -695,6 +695,8 @@ def build_signal(direction, df15, sc1d, sc4h, sc15, sentiment):
         "sl_mode": sl_mode, "atr": round(atr, 1),
         "sc1d": sc1d, "sc4h": sc4h, "sc15": sc15,
         "session": sn, "sentiment": sent,
+        "reasons_1d": reasons_1d, "reasons_4h": reasons_4h, "reasons_15m": reasons_15m,
+        "forecast_slope": forecast_slope,
         "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "id": str(uuid.uuid4())[:8],
     }
@@ -1017,13 +1019,30 @@ def send_signal_tg(sig, r1d, r4h):
     funding = sig.get("funding", 0.0)
     oi = sig.get("oi", 0.0)
     
+    # Backtest Metrics
+    perf = get_performance()
+    backtest_str = "N/A"
+    if perf:
+        backtest_str = f"Win Rate {perf['wr']}% · Profit Factor {perf['pf']}"
+    
+    # Trigger Patterns
+    pats = sig.get("reasons_15m", [])
+    pat_str = pats[0] if pats else "Triple Screen Confluence"
+    
+    # Forecast Slope
+    slope = sig.get("forecast_slope", 0.0)
+    forecast_str = f"{slope:+.2f} (Bullish Trajectory)" if slope > 0 else f"{slope:+.2f} (Bearish Trajectory)"
+    
     msg = (
-        f"*TRADE ALERT: BTC {direction} ({tier}-Grade)*\n"
-        f"Confluence Score: {score}/100\n\n"
+        f"*TRADE SIGNAL: BTC {direction} ({tier}-Grade)*\n"
+        f"Confidence Score: {score}/100\n\n"
         f"Entry Zone : ${sig['entry']:,.1f}\n"
         f"Stop Loss  : ${sig['sl']:,.1f} ({sig['sl_mode']})\n"
         f"Take Profit: ${sig['tp']:,.1f}\n"
         f"Risk/Reward: {sig['rr']}:1\n\n"
+        f"Trigger Pattern: {pat_str}\n"
+        f"Price Forecast : {forecast_str}\n"
+        f"Backtest Record: {backtest_str}\n\n"
         f"Funding Rate: {funding*100:+.4f}% · Open Interest: {oi:,.0f} BTC\n"
         f"Time: {sig['time']} UTC\n\n"
         f"_Strict confluence signal. Execute with safe risk management._"
@@ -1307,7 +1326,7 @@ def run_cron(ex):
 
     if (dir1d != "NEUTRAL" and sc1d >= MIN_1D and sc4h >= MIN_4H and sc15 >= MIN_15M):
         if not skip_signal:
-            sig = build_signal(dir1d, df15, sc1d, sc4h, sc15, sent)
+            sig = build_signal(dir1d, df15, sc1d, sc4h, sc15, sent, r1d, r4h, r15r, forecast_slope)
             if sig:
                 sig["funding"] = funding
                 sig["oi"] = oi
@@ -1427,7 +1446,7 @@ def main():
                     skip_signal = True
 
                 if not skip_signal:
-                    sig = build_signal(dir1d, df15, sc1d, sc4h, sc15, sent)
+                    sig = build_signal(dir1d, df15, sc1d, sc4h, sc15, sent, r1d, r4h, r15, forecast_slope)
                     if sig:
                         sig["funding"] = funding
                         sig["oi"] = oi
