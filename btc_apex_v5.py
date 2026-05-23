@@ -921,11 +921,12 @@ def _tg_listener_loop(ex):
                 
             for update in res.get("result", []):
                 _last_offset[0] = update["update_id"] + 1
-                msg = update.get("message", {})
-                chat = msg.get("chat", {})
+                msg = update.get("message") or {}
+                chat = msg.get("chat") or {}
                 chat_id = chat.get("id")
-                text = msg.get("text", "").strip().lower()
-                username = msg.get("from", {}).get("first_name", "Trader Friend")
+                text = (msg.get("text") or "").strip().lower()
+                from_user = msg.get("from") or {}
+                username = from_user.get("first_name") or "Trader Friend"
                 
                 if not chat_id or not text:
                     continue
