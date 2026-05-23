@@ -236,14 +236,145 @@ def weinstein_stage(df):
     r5  = df.iloc[-7]   # 5 bars ago for slope
     p   = r.close
     slope = r.e200 - r5.e200
-    dist  = (p - r.e200) / r.e200 * 100
-    if slope > 0 and dist > -1:
-        return 2  # Markup — BUY zone
-    if slope < 0 and dist < 1:
-        return 4  # Markdown — SHORT zone
-    if abs(slope) < 0.001 * r.e200:
-        return 1 if p > r.e200 else 3  # Base or Top
-    return 0  # unclear
+    if slope > 0 and p > r.e200:
+        return 2  # Markup — BUY zone (Stage 2)
+    if slope < 0 and p < r.e200:
+        return 4  # Markdown — SHORT zone (Stage 4)
+    if p > r.e200:
+        return 1  # Base (Stage 1 transitioning to Stage 2)
+    return 3      # Top (Stage 3 transitioning to Stage 4)
+
+# ── RSI DIVERGENCE DETECTOR ───────────────────────────────────────────
+def detect_rsi_divergence(df, lookback=40):
+    """
+    Detects Bullish/Bearish RSI Divergence using pivot swing highs/lows.
+    Returns: (bool_bullish_div, bool_bearish_div)
+    """
+    if len(df) < lookback + 5:
+        return False, False
+
+    swing_lows = []
+    swing_highs = []
+    
+    # Scan lookback window to find swing pivots (excluding last 2 unconfirmed bars)
+    for i in range(len(df) - lookback, len(df) - 2):
+        l_val = df.low.iloc[i]
+        h_val = df.high.iloc[i]
+        
+        # Swing low: local minimum in a 5-bar window
+        if (l_val <= df.low.iloc[i-1] and l_val <= df.low.iloc[i-2] and
+            l_val <= df.low.iloc[i+1] and l_val <= df.low.iloc[i+2]):
+            swing_lows.append((i, l_val, df.rsi.iloc[i]))
+            
+        # Swing high: local maximum in a 5-bar window
+        if (h_val >= df.high.iloc[i-1] and h_val >= df.high.iloc[i-2] and
+            h_val >= df.high.iloc[i+1] and h_val >= df.high.iloc[i+2]):
+            swing_highs.append((i, h_val, df.rsi.iloc[i]))
+
+    bull_div = False
+    bear_div = False
+
+    if len(swing_lows) >= 2:
+        idx1, p1, r1 = swing_lows[-1]
+        idx2, p2, r2 = swing_lows[-2]
+        # Bullish: Lower low in price, higher low in RSI
+        if p1 < p2 and r1 > r2 and (len(df) - idx1) <= 10:
+            bull_div = True
+
+    if len(swing_highs) >= 2:
+        idx1, p1, r1 = swing_highs[-1]
+        idx2, p2, r2 = swing_highs[-2]
+        # Bearish: Higher high in price, lower high in RSI
+        if p1 > p2 and r1 < r2 and (len(df) - idx1) <= 10:
+            bear_div = True
+
+    return bull_div, bear_div
+
+# ── ACTIVE SMC ZONE TRACKER ───────────────────────────────────────────
+def get_smc_signals(df, lookback=50):
+    """
+    Scans lookback window to find unmitigated Bullish/Bearish OBs, FVGs, and BOS.
+    """
+    if len(df) < lookback + 5:
+        return {
+            "testing_bull_ob": False, "testing_bear_ob": False,
+            "testing_bull_fvg": False, "testing_bear_fvg": False,
+            "bos_bull": False, "bos_bear": False
+        }
+
+    c_close = df.close.iloc[-2]
+    c_low = df.low.iloc[-2]
+    c_high = df.high.iloc[-2]
+
+    active_bull_obs = []
+    active_bear_obs = []
+    vol_ma = df.volume.rolling(10).mean()
+
+    for i in range(len(df) - lookback, len(df) - 2):
+        v = df.volume.iloc[i]
+        v_ma = vol_ma.iloc[i]
+        
+        # Bullish OB: bearish candle followed by strong volume-supported bullish candle
+        if (df.close.iloc[i-1] < df.open.iloc[i-1] and
+            df.close.iloc[i] > df.open.iloc[i] and
+            df.close.iloc[i] > df.high.iloc[i-1] and
+            v > v_ma * 1.3):
+            active_bull_obs.append((df.low.iloc[i-1], df.high.iloc[i-1], i))
+
+        # Bearish OB: bullish candle followed by strong volume-supported bearish candle
+        if (df.close.iloc[i-1] > df.open.iloc[i-1] and
+            df.close.iloc[i] < df.open.iloc[i] and
+            df.close.iloc[i] < df.low.iloc[i-1] and
+            v > v_ma * 1.3):
+            active_bear_obs.append((df.low.iloc[i-1], df.high.iloc[i-1], i))
+
+    # Mitigations
+    unmitigated_bull_obs = []
+    for ob_low, ob_high, idx in active_bull_obs:
+        if not any(df.close.iloc[j] < ob_low for j in range(idx + 1, len(df) - 1)):
+            unmitigated_bull_obs.append((ob_low, ob_high))
+
+    unmitigated_bear_obs = []
+    for ob_low, ob_high, idx in active_bear_obs:
+        if not any(df.close.iloc[j] > ob_high for j in range(idx + 1, len(df) - 1)):
+            unmitigated_bear_obs.append((ob_low, ob_high))
+
+    # FVGs
+    active_bull_fvgs = []
+    active_bear_fvgs = []
+    for i in range(len(df) - lookback, len(df) - 2):
+        if df.low.iloc[i] > df.high.iloc[i-2]:
+            active_bull_fvgs.append((df.high.iloc[i-2], df.low.iloc[i], i))
+        if df.high.iloc[i] < df.low.iloc[i-2]:
+            active_bear_fvgs.append((df.high.iloc[i], df.low.iloc[i-2], i))
+
+    unmitigated_bull_fvgs = []
+    for fvg_low, fvg_high, idx in active_bull_fvgs:
+        if not any(df.low.iloc[j] < fvg_low for j in range(idx + 1, len(df) - 1)):
+            unmitigated_bull_fvgs.append((fvg_low, fvg_high))
+
+    unmitigated_bear_fvgs = []
+    for fvg_low, fvg_high, idx in active_bear_fvgs:
+        if not any(df.high.iloc[j] > fvg_high for j in range(idx + 1, len(df) - 1)):
+            unmitigated_bear_fvgs.append((fvg_low, fvg_high))
+
+    # Tests
+    testing_bull_ob = any(c_low <= ob_high and c_close >= ob_low for ob_low, ob_high in unmitigated_bull_obs)
+    testing_bear_ob = any(c_high >= ob_low and c_close <= ob_high for ob_low, ob_high in unmitigated_bear_obs)
+    testing_bull_fvg = any(c_low <= fvg_high and c_close >= fvg_low for fvg_low, fvg_high in unmitigated_bull_fvgs)
+    testing_bear_fvg = any(c_high >= fvg_low and c_close <= fvg_high for fvg_low, fvg_high in unmitigated_bear_fvgs)
+
+    # Break of Structure (BOS)
+    swing_hi_val = df.high.iloc[-25:-3].max()
+    swing_lo_val = df.low.iloc[-25:-3].min()
+    bos_bull = c_close > swing_hi_val
+    bos_bear = c_close < swing_lo_val
+
+    return {
+        "testing_bull_ob": testing_bull_ob, "testing_bear_ob": testing_bear_ob,
+        "testing_bull_fvg": testing_bull_fvg, "testing_bear_fvg": testing_bear_fvg,
+        "bos_bull": bos_bull, "bos_bear": bos_bear
+    }
 
 # ── WYCKOFF PHASE ─────────────────────────────────────────────────────
 def wyckoff_phase(df):
@@ -256,13 +387,13 @@ def wyckoff_phase(df):
     price_up = r.close > win.close.iloc[0]
 
     if tight and obv_up and sweep_lo:
-        return "ACCUMULATION"   # spring test — long setup
+        return "ACCUMULATION"
     if not tight and obv_up and price_up:
-        return "MARKUP"          # trend up
+        return "MARKUP"
     if tight and not obv_up and sweep_hi:
-        return "DISTRIBUTION"   # UTAD — short setup
+        return "DISTRIBUTION"
     if not tight and not obv_up and not price_up:
-        return "MARKDOWN"        # trend down
+        return "MARKDOWN"
     return "TRANSITION"
 
 # ── SESSION ───────────────────────────────────────────────────────────
@@ -371,33 +502,61 @@ def analyze_4h(df4h, direction):
     reasons = []
     lng = direction == "LONG"
 
+    # Smart Money Zones & Divergence & BOS
+    smc = get_smc_signals(df4h)
+    bull_div, bear_div = detect_rsi_divergence(df4h)
+
+    # RSI Divergence (Very strong)
+    if lng and bull_div: score += 20; reasons.append("4H Bull RSI Div")
+    if not lng and bear_div: score += 20; reasons.append("4H Bear RSI Div")
+
+    # Swing Break of Structure (BOS)
+    if lng and smc["bos_bull"]: score += 15; reasons.append("4H Bull BOS")
+    if not lng and smc["bos_bear"]: score += 15; reasons.append("4H Bear BOS")
+
+    # Order Block test
+    if lng and smc["testing_bull_ob"]: score += 15; reasons.append("4H test Bull OB")
+    if not lng and smc["testing_bear_ob"]: score += 15; reasons.append("4H test Bear OB")
+
+    # FVG zone test
+    if lng and smc["testing_bull_fvg"]: score += 12; reasons.append("4H test Bull FVG")
+    if not lng and smc["testing_bear_fvg"]: score += 12; reasons.append("4H test Bear FVG")
+
+    # Fib Levels
     fib = get_fib_levels(df4h)
     at_fib, fn = near_fib(price, fib, pct=0.008)
     if at_fib: score += 15; reasons.append(f"4H at Fib {fn}")
 
+    # Kijun / Cloud
     if abs(price - r.ichi_kijun) / price < 0.008: score += 15; reasons.append("4H at Kijun")
     elif lng and bool(r.above_cloud): score += 8; reasons.append("4H above cloud")
     elif not lng and bool(r.below_cloud): score += 8; reasons.append("4H below cloud")
 
-    rsi_ok = (35 < r.rsi < 55) if lng else (45 < r.rsi < 65)
-    if rsi_ok: score += 10; reasons.append(f"4H RSI {r.rsi:.0f} zone")
+    # Smarter RSI Zones
+    rsi_val = r.rsi
+    if lng:
+        if 35 <= rsi_val <= 55: score += 10; reasons.append(f"4H RSI {rsi_val:.0f} pullback")
+        elif 55 < rsi_val <= 70: score += 10; reasons.append(f"4H RSI {rsi_val:.0f} markup")
+        elif rsi_val < 35: score += 15; reasons.append(f"4H RSI {rsi_val:.0f} oversold")
+    else:
+        if 45 < rsi_val <= 65: score += 10; reasons.append(f"4H RSI {rsi_val:.0f} pullback")
+        elif 30 <= rsi_val <= 45: score += 10; reasons.append(f"4H RSI {rsi_val:.0f} markdown")
+        elif rsi_val > 65: score += 15; reasons.append(f"4H RSI {rsi_val:.0f} overbought")
 
-    if lng and bool(df4h.ob_bull.iloc[-4:-1].any()):  score += 10; reasons.append("4H Bull OB")
-    if not lng and bool(df4h.ob_bear.iloc[-4:-1].any()): score += 10; reasons.append("4H Bear OB")
-
-    if lng and (bool(r.fvg_bull) or bool(r.sweep_lo)): score += 10; reasons.append("4H FVG/Sweep bull")
-    if not lng and (bool(r.fvg_bear) or bool(r.sweep_hi)): score += 10; reasons.append("4H FVG/Sweep bear")
-
+    # MACD Trend Direction
     if lng and r.macdh > r.macdh1:      score += 10; reasons.append("4H MACD turning up")
     if not lng and r.macdh < r.macdh1:  score += 10; reasons.append("4H MACD turning dn")
 
+    # Stochastic RSI crosses
     stk_up = r.stk > r["std"] and rp.stk <= rp["std"] and r.stk < 50
     stk_dn = r.stk < r["std"] and rp.stk >= rp["std"] and r.stk > 50
     if lng and stk_up:      score += 10; reasons.append("4H Stoch cross up")
     if not lng and stk_dn:  score += 10; reasons.append("4H Stoch cross dn")
 
-    if df4h.vol_r.iloc[-4:-1].mean() < 0.9: score += 10; reasons.append("4H vol declining (pullback)")
+    # Pullback Volume Check
+    if df4h.vol_r.iloc[-4:-1].mean() < 0.9: score += 10; reasons.append("4H vol declining")
 
+    # Wyckoff
     phase = wyckoff_phase(df4h)
     if lng and phase in ("ACCUMULATION","MARKUP"):      score += 5; reasons.append(f"Wyckoff {phase}")
     if not lng and phase in ("DISTRIBUTION","MARKDOWN"): score += 5; reasons.append(f"Wyckoff {phase}")
@@ -417,6 +576,25 @@ def analyze_15m(df15, direction):
     reasons = []
     lng = direction == "LONG"
 
+    # SMC & Divergence
+    smc = get_smc_signals(df15)
+    bull_div, bear_div = detect_rsi_divergence(df15)
+
+    # RSI Divergence on 15m
+    if lng and bull_div: score += 20; reasons.append("15m Bull RSI Div")
+    if not lng and bear_div: score += 20; reasons.append("15m Bear RSI Div")
+
+    # BOS on 15m
+    if lng and smc["bos_bull"]: score += 15; reasons.append("15m Bull BOS")
+    if not lng and smc["bos_bear"]: score += 15; reasons.append("15m Bear BOS")
+
+    # SMC Zone tests
+    if lng and smc["testing_bull_ob"]: score += 15; reasons.append("15m test Bull OB")
+    if not lng and smc["testing_bear_ob"]: score += 15; reasons.append("15m test Bear OB")
+    if lng and smc["testing_bull_fvg"]: score += 12; reasons.append("15m test Bull FVG")
+    if not lng and smc["testing_bear_fvg"]: score += 12; reasons.append("15m test Bear FVG")
+
+    # Candle Patterns
     if lng and (bool(r.bull_engulf) or bool(r.hammer)):
         score += 20; reasons.append("15m bull engulf/hammer")
     elif not lng and (bool(r.bear_engulf) or bool(r.shoot_star)):
@@ -426,22 +604,34 @@ def analyze_15m(df15, direction):
     elif not lng and r.bull == 0 and r.body > r.atr * 0.4:
         score += 8; reasons.append("15m strong bear candle")
 
+    # EMA Cross
     if lng and r.e9 > r.e20 and rp.e9 <= rp.e20:     score += 15; reasons.append("15m EMA9 crossed above 20")
     elif lng and r.e9 > r.e20:                         score += 7;  reasons.append("15m EMA9>20")
     if not lng and r.e9 < r.e20 and rp.e9 >= rp.e20: score += 15; reasons.append("15m EMA9 crossed below 20")
     elif not lng and r.e9 < r.e20:                    score += 7;  reasons.append("15m EMA9<20")
 
+    # MACD Cross
     if lng and r.macd > r.macds and rp.macd <= rp.macds:     score += 15; reasons.append("15m MACD bull cross")
     elif lng and r.macdh > 0:                                 score += 6;  reasons.append("15m MACD pos")
     if not lng and r.macd < r.macds and rp.macd >= rp.macds: score += 15; reasons.append("15m MACD bear cross")
     elif not lng and r.macdh < 0:                            score += 6;  reasons.append("15m MACD neg")
 
+    # Vol spike
     if r.vol_r >= 1.8:   score += 15; reasons.append(f"15m vol spike {r.vol_r:.1f}x")
     elif r.vol_r >= 1.2: score += 7;  reasons.append(f"15m vol {r.vol_r:.1f}x")
 
-    if lng and r.rsi < 45 and r.rsi > r.rsi1:  score += 10; reasons.append(f"15m RSI {r.rsi:.0f} up")
-    if not lng and r.rsi > 55 and r.rsi < r.rsi1: score += 10; reasons.append(f"15m RSI {r.rsi:.0f} dn")
+    # Smarter RSI zones
+    rsi_val = r.rsi
+    if lng:
+        if rsi_val < 35: score += 15; reasons.append(f"15m RSI OS ({rsi_val:.0f})")
+        elif rsi_val < 50: score += 10; reasons.append(f"15m RSI low ({rsi_val:.0f})")
+        elif rsi_val < 70: score += 7; reasons.append(f"15m RSI strong ({rsi_val:.0f})")
+    else:
+        if rsi_val > 65: score += 15; reasons.append(f"15m RSI OB ({rsi_val:.0f})")
+        elif rsi_val > 50: score += 10; reasons.append(f"15m RSI high ({rsi_val:.0f})")
+        elif rsi_val > 30: score += 7; reasons.append(f"15m RSI weak ({rsi_val:.0f})")
 
+    # Stochastic RSI
     stk_up = r.stk > r["std"] and rp.stk <= rp["std"]
     stk_dn = r.stk < r["std"] and rp.stk >= rp["std"]
     if lng and stk_up:     score += 10; reasons.append("15m Stoch up")
@@ -450,9 +640,6 @@ def analyze_15m(df15, direction):
     p = r.close
     if min(abs(p-r.vwap)/p, abs(p-r.e20)/p, abs(p-r.e50)/p) < 0.003:
         score += 10; reasons.append("15m at key level")
-
-    if lng and (bool(r.fvg_bull) or bool(r.ob_bull)):       score += 5; reasons.append("15m SMC bull")
-    if not lng and (bool(r.fvg_bear) or bool(r.ob_bear)):   score += 5; reasons.append("15m SMC bear")
 
     if lng and r.willr < -75:  score += 5; reasons.append(f"15m WillR {r.willr:.0f} OS")
     if not lng and r.willr > -25: score += 5; reasons.append(f"15m WillR {r.willr:.0f} OB")
