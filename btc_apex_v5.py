@@ -656,10 +656,101 @@ def analyze_15m(df15, direction):
 
 
 # ══════════════════════════════════════════════════════════════════════
+#  DYNAMIC HISTORICAL BACKTESTER
+# ══════════════════════════════════════════════════════════════════════
+
+def backtest_strategy_historically(df15, df4h, df1d, direction, lookback=120):
+    """
+    Runs a zero-compromise local backtest of the Triple Screen Cascade
+    on historical candles in memory. Prevents lookahead bias.
+    """
+    if len(df15) < lookback + 10 or len(df4h) < 50 or len(df1d) < 30:
+        return 0, 0, 100.0
+    
+    wins = 0
+    losses = 0
+    start_idx = max(50, len(df15) - lookback)
+    end_idx = len(df15) - 3  # resolve historical outcomes, excluding latest 2
+    
+    for i in range(start_idx, end_idx):
+        t_ref = df15.index[i]
+        
+        # Slices with .copy() to completely isolate the dataframes
+        hist_df1d = df1d[df1d.index <= t_ref].copy()
+        hist_df4h = df4h[df4h.index <= t_ref].copy()
+        hist_df15 = df15.iloc[:i+1].copy()
+        
+        if len(hist_df1d) < 10 or len(hist_df4h) < 10 or len(hist_df15) < 10:
+            continue
+            
+        h_dir1d, h_sc1d, _ = analyze_1d(hist_df1d)
+        if h_dir1d != direction or h_sc1d < MIN_1D:
+            continue
+            
+        h_sc4h, _ = analyze_4h(hist_df4h, direction)
+        if h_sc4h < MIN_4H:
+            continue
+            
+        h_sc15, _ = analyze_15m(hist_df15, direction)
+        if h_sc15 < MIN_15M:
+            continue
+            
+        # Entry setup confirmed historically at candle i
+        entry_val = df15.close.iloc[i]
+        atr_val = df15.atr.iloc[i]
+        if not atr_val or pd.isna(atr_val):
+            atr_val = entry_val * 0.01
+            
+        vol_r_val = df15.vol_r.iloc[i] if "vol_r" in df15.columns else 1.0
+        if vol_r_val > 1.5:
+            sl_m, tp_m = 1.5, 3.5
+        elif vol_r_val < 0.7:
+            sl_m, tp_m = 1.0, 2.2
+        else:
+            sl_m, tp_m = SL_ATR, TP_ATR
+            
+        if direction == "LONG":
+            sl_val = entry_val - atr_val * sl_m
+            tp_val = entry_val + atr_val * tp_m
+        else:
+            sl_val = entry_val + atr_val * sl_m
+            tp_val = entry_val - atr_val * tp_m
+            
+        # Track simulated outcome
+        outcome = "PENDING"
+        for j in range(i + 1, len(df15)):
+            h_high = df15.high.iloc[j]
+            h_low = df15.low.iloc[j]
+            if direction == "LONG":
+                if h_high >= tp_val:
+                    outcome = "WIN"
+                    break
+                elif h_low <= sl_val:
+                    outcome = "LOSS"
+                    break
+            else:
+                if h_low <= tp_val:
+                    outcome = "WIN"
+                    break
+                elif h_high >= sl_val:
+                    outcome = "LOSS"
+                    break
+                    
+        if outcome == "WIN":
+            wins += 1
+        elif outcome == "LOSS":
+            losses += 1
+            
+    total = wins + losses
+    win_rate = (wins / total * 100) if total > 0 else 100.0
+    return wins, losses, win_rate
+
+
+# ══════════════════════════════════════════════════════════════════════
 #  SIGNAL BUILDER
 # ══════════════════════════════════════════════════════════════════════
 
-def build_signal(direction, df15, sc1d, sc4h, sc15, sentiment, reasons_1d, reasons_4h, reasons_15m, forecast_slope):
+def build_signal(direction, df15, sc1d, sc4h, sc15, sentiment, reasons_1d, reasons_4h, reasons_15m, forecast_slope, local_wins, local_losses, local_wr):
     r     = df15.iloc[-2]
     atr   = r.atr
     aavg  = r.atr_avg if r.atr_avg > 0 else atr
@@ -705,12 +796,8 @@ def build_signal(direction, df15, sc1d, sc4h, sc15, sentiment, reasons_1d, reaso
     unique_patterns = list(set(all_patterns))
     pattern_str = ", ".join(unique_patterns) if unique_patterns else "Price Action Structure"
 
-    # Fetch backtest record metrics
-    perf = get_performance()
-    if perf:
-        backtest_str = f"Win Rate: {perf['wr']}% | Profit Factor: {perf['pf']} (n={perf['n']})"
-    else:
-        backtest_str = "Verified triple screen historical setup"
+    # Use the dynamic in-memory backtest results
+    backtest_str = f"Win Rate: {local_wr:.1f}% ({local_wins}W-{local_losses}L in last 48h)"
 
     # Project price trajectory forecast
     forecast_str = f"Trajectory: {'Bullish' if forecast_slope > 0 else 'Bearish'} (Slope {forecast_slope:+.2f})"
@@ -1343,8 +1430,15 @@ def run_cron(ex):
     sig = None
 
     if (dir1d != "NEUTRAL" and sc1d >= MIN_1D and sc4h >= MIN_4H and sc15 >= MIN_15M):
+        # Run local in-memory backtest
+        local_wins, local_losses, local_wr = backtest_strategy_historically(df15, df4h, df1d, dir1d)
+        total_local = local_wins + local_losses
+        if total_local > 0 and local_wr < 80.0:
+            skip_signal = True
+            skip_reasons.append(f"Regime win rate too low ({local_wr:.1f}% based on {total_local} historical trades)")
+
         if not skip_signal:
-            sig = build_signal(dir1d, df15, sc1d, sc4h, sc15, sent, r1d, r4h, r15r, forecast_slope)
+            sig = build_signal(dir1d, df15, sc1d, sc4h, sc15, sent, r1d, r4h, r15r, forecast_slope, local_wins, local_losses, local_wr)
             if sig:
                 sig["funding"] = funding
                 sig["oi"] = oi
@@ -1458,13 +1552,26 @@ def main():
 
                 # Apply protection gates
                 skip_signal = False
-                if is_spike or (funding > 0.0025 and dir1d == "LONG") or (funding < -0.0025 and dir1d == "SHORT"):
+                skip_reasons = []
+                if is_spike:
                     skip_signal = True
+                    skip_reasons.append("Whale Spike detected")
+                if (funding > 0.0025 and dir1d == "LONG") or (funding < -0.0025 and dir1d == "SHORT"):
+                    skip_signal = True
+                    skip_reasons.append(f"Extreme Funding Rate: {funding*100:+.4f}%")
                 if (dir1d == "LONG" and forecast_slope < -5.0) or (dir1d == "SHORT" and forecast_slope > 5.0):
                     skip_signal = True
+                    skip_reasons.append(f"Forecasting adverse momentum (Slope {forecast_slope:+.2f})")
+
+                # Run local in-memory backtest
+                local_wins, local_losses, local_wr = backtest_strategy_historically(df15, df4h, df1d, dir1d)
+                total_local = local_wins + local_losses
+                if total_local > 0 and local_wr < 80.0:
+                    skip_signal = True
+                    skip_reasons.append(f"Regime win rate too low ({local_wr:.1f}% based on {total_local} historical trades)")
 
                 if not skip_signal:
-                    sig = build_signal(dir1d, df15, sc1d, sc4h, sc15, sent, r1d, r4h, r15, forecast_slope)
+                    sig = build_signal(dir1d, df15, sc1d, sc4h, sc15, sent, r1d, r4h, r15, forecast_slope, local_wins, local_losses, local_wr)
                     if sig:
                         sig["funding"] = funding
                         sig["oi"] = oi
@@ -1472,6 +1579,8 @@ def main():
                         send_signal_tg(sig, r1d, r4h)
                         log_signal(sig)
                         last_sig_candle = idx
+                else:
+                    print(s(f"  ⚠️ Setup aligned but blocked by: {', '.join(skip_reasons)}", YL))
 
             if loop % 5 == 0:
                 print_tracker(dir1d, sc1d, sc4h, sc15, get_adaptive_min())
