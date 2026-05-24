@@ -37,10 +37,10 @@ except ImportError:
     import ta
 
 # ── CONFIG ────────────────────────────────────────────────────────────
-EXCHANGE  = "bitget"
+EXCHANGE  = "binance"
 SYMBOL    = "BTC/USDT:USDT"
 TF_15M, TF_1H, TF_4H, TF_1D = "15m", "1h", "4h", "1d"
-LIMIT     = 300
+LIMIT     = 600
 
 # Telegram — hardcoded fallback (also reads from env for GitHub Actions secrets)
 _TG_TOKEN_DEFAULT = "8775276870:AAGABvQ6PwtRgGPNbk3V4YX_A0eVXxpiWyo"
@@ -52,8 +52,8 @@ TG_CHAT   = os.getenv("TG_CHAT",  _TG_CHAT_DEFAULT)
 MIN_1D    = 55    # 1D must show absolute clear trend tide
 MIN_4H    = 50    # 4H must find deep setup wave
 MIN_15M   = 50    # 15m must have strong trigger ripple
-MIN_TOTAL = 72    # Only A-tier and above allowed
-MIN_APLUS = 80    # Strongest setups only
+MIN_TOTAL = 80    # Strict A-plus gate (Confidence must be 80% to trigger)
+MIN_APLUS = 88    # God-predicted setups only
 MIN_RR    = 2.0   # Strict minimum 2:1 risk-to-reward ratio
 SL_ATR    = 1.2
 TP_ATR    = 2.8
@@ -659,7 +659,7 @@ def analyze_15m(df15, direction):
 #  DYNAMIC HISTORICAL BACKTESTER
 # ══════════════════════════════════════════════════════════════════════
 
-def backtest_strategy_historically(df15, df4h, df1d, direction, lookback=120):
+def backtest_strategy_historically(df15, df4h, df1d, direction, lookback=300):
     """
     Runs a zero-compromise local backtest of the Triple Screen Cascade
     on historical candles in memory. Prevents lookahead bias.
@@ -1383,12 +1383,6 @@ def run_cron(ex):
     if is_spike:
         skip_signal = True
         skip_reasons.append(f"Whale Volatility Protection ({spike_reason})")
-    if funding > 0.0025 and dir1d == "LONG":
-        skip_signal = True
-        skip_reasons.append(f"Overleveraged longs (Funding {funding*100:+.4f}%)")
-    if funding < -0.0025 and dir1d == "SHORT":
-        skip_signal = True
-        skip_reasons.append(f"Overleveraged shorts (Funding {funding*100:+.4f}%)")
     if dir1d == "LONG" and forecast_slope < -5.0:
         skip_signal = True
         skip_reasons.append(f"Forecasting downward momentum ({forecast_slope:+.2f})")
@@ -1527,9 +1521,6 @@ def main():
                 if is_spike:
                     skip_signal = True
                     skip_reasons.append("Whale Spike detected")
-                if (funding > 0.0025 and dir1d == "LONG") or (funding < -0.0025 and dir1d == "SHORT"):
-                    skip_signal = True
-                    skip_reasons.append(f"Extreme Funding Rate: {funding*100:+.4f}%")
                 if (dir1d == "LONG" and forecast_slope < -5.0) or (dir1d == "SHORT" and forecast_slope > 5.0):
                     skip_signal = True
                     skip_reasons.append(f"Forecasting adverse momentum (Slope {forecast_slope:+.2f})")
