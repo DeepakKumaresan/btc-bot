@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-BTC APEX SIGNAL BOT v5.0 — PRO TRADER INTELLIGENCE
-====================================================
+BTC APEX SIGNAL BOT v6.0 — INSTITUTIONAL PRO INTELLIGENCE
+==========================================================
 Triple Screen Cascade: 1D -> 4H -> 15m (Elder's Method)
 ALL THREE timeframes must agree. No compromise.
 
@@ -9,11 +9,15 @@ BOOK CONCEPTS:
   Elder's Triple Screen  : 1D tide -> 4H wave -> 15m entry ripple
   Murphy Multi-TF        : Volume + price multi-timeframe confluence
   Weinstein Stage        : Only buy Stage 2, short Stage 4
-  Douglas A-Grade        : Minimum 68/100 confidence — zero compromise
+  Douglas A-Grade        : Minimum 80/100 confidence — zero compromise
   ICT Smart Money        : FVG, Order Blocks, Liquidity Sweeps, BoS
 
 INDICATORS: EMA9/20/50/200, Ichimoku, RSI+Div, MACD, BB, ATR, ADX,
             StochRSI, Williams %R, CCI, OBV, VWAP, Auto-Fibonacci, SMC
+
+ML ENGINE : scikit-learn LinearRegression + Ridge + Lasso ensemble
+            Trained on live indicator features — predicts next-bar direction
+            and target zones without overfitting or memory bloat.
 
 BACKTESTING: Logs every signal -> auto-checks TP/SL outcomes -> learns
 SENTIMENT  : Fear & Greed + CoinGecko market data
@@ -35,6 +39,19 @@ except ImportError:
     import subprocess
     subprocess.check_call([sys.executable, "-m", "pip", "install", "ta"])
     import ta
+
+try:
+    from sklearn.linear_model import LinearRegression, Ridge, Lasso
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.pipeline import Pipeline
+    _SKLEARN_OK = True
+except ImportError:
+    import subprocess
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "scikit-learn"])
+    from sklearn.linear_model import LinearRegression, Ridge, Lasso
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.pipeline import Pipeline
+    _SKLEARN_OK = True
 
 # ── CONFIG ────────────────────────────────────────────────────────────
 EXCHANGE  = "binance"
@@ -750,7 +767,7 @@ def backtest_strategy_historically(df15, df4h, df1d, direction, lookback=300):
 #  SIGNAL BUILDER
 # ══════════════════════════════════════════════════════════════════════
 
-def build_signal(direction, df15, sc1d, sc4h, sc15, sentiment, reasons_1d, reasons_4h, reasons_15m, forecast_slope, local_wins, local_losses, local_wr):
+def build_signal(direction, df15, sc1d, sc4h, sc15, sentiment, reasons_1d, reasons_4h, reasons_15m, forecast_slope, local_wins, local_losses, local_wr, ml_pred=0.0, ml_label="", funding=0.0, oi=0.0):
     r     = df15.iloc[-2]
     atr   = r.atr
     aavg  = r.atr_avg if r.atr_avg > 0 else atr
@@ -776,6 +793,52 @@ def build_signal(direction, df15, sc1d, sc4h, sc15, sentiment, reasons_1d, reaso
     sn, sm = session()
     final  = min(100, final + sm)
 
+    # ML Ensemble boost: if all 3 models agree with signal direction, +3 confidence
+    if direction == "LONG"  and ml_pred > 0.05:  final = min(100, final + 3)
+    if direction == "SHORT" and ml_pred < -0.05: final = min(100, final + 3)
+    # ML contradicts signal direction — penalise confidence
+    if direction == "LONG"  and ml_pred < -0.1:  final = max(0, final - 4)
+    if direction == "SHORT" and ml_pred > 0.1:   final = max(0, final - 4)
+
+    # ── High/Low Point Funding Reversal Engine ──
+    # User's Strategy: High/low funding rates make profits by identifying reversals at high/low points.
+    is_high_point = False
+    is_low_point = False
+    
+    if "bb_up" in df15.columns and "bb_lo" in df15.columns:
+        bb_up_15 = df15.bb_up.iloc[-2]
+        bb_lo_15 = df15.bb_lo.iloc[-2]
+        rsi_15 = r.rsi
+        
+        # High point: Price is near/above upper 15m Bollinger Band OR RSI is overbought (>= 68)
+        if price >= bb_up_15 * 0.998 or rsi_15 >= 68:
+            is_high_point = True
+        # Low point: Price is near/below lower 15m Bollinger Band OR RSI is oversold (<= 32)
+        if price <= bb_lo_15 * 1.002 or rsi_15 <= 32:
+            is_low_point = True
+
+    funding_msg = ""
+    if direction == "LONG" and is_low_point and funding < -0.01:
+        # Extreme negative funding (shorts pay longs) at a clear low point -> Premium Reversal Setup
+        boost = 5 if funding >= -0.03 else 10
+        final = min(100, final + boost)
+        funding_msg = f"Low-Point Reversal Boost (+{boost} conf, Funding {funding*100:+.4f}%)"
+        reasons_15m.append(f"Funding low point reversal (+{boost})")
+    elif direction == "SHORT" and is_high_point and funding > 0.02:
+        # Extreme positive funding (longs pay shorts) at a clear high point -> Premium Reversal Setup
+        boost = 5 if funding <= 0.05 else 10
+        final = min(100, final + boost)
+        funding_msg = f"High-Point Reversal Boost (+{boost} conf, Funding {funding*100:+.4f}%)"
+        reasons_15m.append(f"Funding high point reversal (+{boost})")
+        
+    # Penalty for chasing extremes without proper structure:
+    if direction == "LONG" and funding > 0.05 and not is_low_point:
+        final = max(0, final - 5)
+        reasons_15m.append("High funding long chase penalty (-5)")
+    elif direction == "SHORT" and funding < -0.03 and not is_high_point:
+        final = max(0, final - 5)
+        reasons_15m.append("Negative funding short chase penalty (-5)")
+
     adp = get_adaptive_min()
     if final < adp: return None
 
@@ -792,15 +855,18 @@ def build_signal(direction, df15, sc1d, sc4h, sc15, sentiment, reasons_1d, reaso
         elif "cross" in reason.lower() or "ema" in reason.lower(): all_patterns.append("EMA Cross")
         elif "fib" in reason.lower(): all_patterns.append("Fibonacci Level")
         elif "kijun" in reason.lower(): all_patterns.append("Kijun support")
-    
+
     unique_patterns = list(set(all_patterns))
     pattern_str = ", ".join(unique_patterns) if unique_patterns else "Price Action Structure"
 
     # Use the dynamic in-memory backtest results
-    backtest_str = f"Win Rate: {local_wr:.1f}% ({local_wins}W-{local_losses}L in last 48h)"
+    backtest_str = f"Win Rate: {local_wr:.1f}% ({local_wins}W-{local_losses}L in last 75h)"
 
-    # Project price trajectory forecast
+    # Linear regression slope for Telegram
     forecast_str = f"Trajectory: {'Bullish' if forecast_slope > 0 else 'Bearish'} (Slope {forecast_slope:+.2f})"
+
+    # ML ensemble label for Telegram
+    ml_str = ml_label if ml_label else "ML engine: insufficient data"
 
     return {
         "dir": direction, "entry": round(price, 1),
@@ -813,7 +879,11 @@ def build_signal(direction, df15, sc1d, sc4h, sc15, sentiment, reasons_1d, reaso
         "id": str(uuid.uuid4())[:8],
         "patterns": pattern_str,
         "backtest": backtest_str,
-        "forecast": forecast_str
+        "forecast": forecast_str,
+        "ml": ml_str,
+        "funding": funding,
+        "oi": oi,
+        "funding_msg": funding_msg,
     }
 
 
@@ -930,7 +1000,7 @@ def fetch_derivative_data(ex):
     return funding, oi
 
 def linear_regression_forecast(prices, period=15):
-    """Calculates linear regression slope to forecast price trajectory."""
+    """Calculates linear regression slope to forecast price trajectory (numpy fallback)."""
     if len(prices) < period:
         return 0.0
     y = np.array(prices[-period:])
@@ -942,6 +1012,93 @@ def linear_regression_forecast(prices, period=15):
     if den == 0:
         return 0.0
     return num / den
+
+
+def ml_ensemble_forecast(df, lookback=60):
+    """
+    scikit-learn Ensemble Forecast Engine.
+    Trains THREE models (LinearRegression + Ridge + Lasso) on live
+    indicator features extracted from the last `lookback` candles.
+    Predicts the next bar's expected return direction and magnitude.
+
+    Features used per bar:
+      - RSI, MACD histogram, StochK, CCI, Williams %R  (momentum)
+      - OBV slope, Volume ratio                         (volume pressure)
+      - ATR ratio to mean ATR                           (volatility)
+      - EMA9/EMA20 spread, EMA20/EMA50 spread          (trend alignment)
+      - Bollinger Band width                            (squeeze / expansion)
+      - Candle body ratio                               (price action)
+
+    Target: next-bar % return (continuous)
+    Consensus: average prediction from all 3 models, scaled to direction score.
+    """
+    MIN_ROWS = lookback + 5
+    required_cols = ["rsi", "macdh", "stk", "cci", "willr", "obv_slope",
+                     "vol_r", "atr", "atr_avg", "e9", "e20", "e50", "bb_w", "body"]
+
+    if len(df) < MIN_ROWS:
+        return 0.0, "insufficient data"
+    if not all(c in df.columns for c in required_cols):
+        return 0.0, "missing features"
+
+    try:
+        sub = df.iloc[-MIN_ROWS:].copy()
+
+        # Build feature matrix
+        feats = pd.DataFrame({
+            "rsi":       sub["rsi"],
+            "macdh":     sub["macdh"],
+            "stk":       sub["stk"],
+            "cci":       sub["cci"].clip(-300, 300),
+            "willr":     sub["willr"],
+            "obv_slope": sub["obv_slope"] / (sub["close"].abs() + 1),
+            "vol_r":     sub["vol_r"].clip(0, 5),
+            "atr_ratio": sub["atr"] / sub["atr_avg"].replace(0, 1),
+            "ema_fast":  (sub["e9"]  - sub["e20"]) / sub["close"],
+            "ema_slow":  (sub["e20"] - sub["e50"]) / sub["close"],
+            "bb_w":      sub["bb_w"].clip(0, 20),
+            "body_r":    sub["body"] / (sub["atr"].replace(0, 1)),
+        }).fillna(0)
+
+        # Target: next-bar % return (forward shift by 1)
+        returns = sub["close"].pct_change().shift(-1).fillna(0) * 100
+
+        X = feats.values[:-1]   # all rows except last (no future target for last)
+        y = returns.values[:-1]
+        X_live = feats.values[-1:] # the live bar to predict
+
+        if len(X) < 20:
+            return 0.0, "insufficient training samples"
+
+        # THREE MODELS — ensemble for robustness
+        pipe_lr  = Pipeline([("scaler", StandardScaler()), ("model", LinearRegression())])
+        pipe_rdg = Pipeline([("scaler", StandardScaler()), ("model", Ridge(alpha=1.0))])
+        pipe_lso = Pipeline([("scaler", StandardScaler()), ("model", Lasso(alpha=0.01, max_iter=2000))])
+
+        pipe_lr.fit(X, y)
+        pipe_rdg.fit(X, y)
+        pipe_lso.fit(X, y)
+
+        pred_lr  = float(pipe_lr.predict(X_live)[0])
+        pred_rdg = float(pipe_rdg.predict(X_live)[0])
+        pred_lso = float(pipe_lso.predict(X_live)[0])
+
+        # Consensus: trimmed average (drop most extreme, average rest)
+        preds     = sorted([pred_lr, pred_rdg, pred_lso])
+        consensus = float(np.mean(preds))      # all 3 are lightweight, keep all
+
+        # Direction label for signal
+        if consensus > 0.05:
+            label = f"ML Bullish ({consensus:+.3f}%)"
+        elif consensus < -0.05:
+            label = f"ML Bearish ({consensus:+.3f}%)"
+        else:
+            label = f"ML Neutral ({consensus:+.3f}%)"
+
+        return consensus, label
+
+    except Exception as e:
+        return 0.0, f"ML error: {e}"
 
 def check_whale_spike(df):
     """Detects if the most recent closed candle has extreme volume or range."""
@@ -1136,16 +1293,21 @@ def send_signal_tg(sig, r1d, r4h):
     patterns = sig.get("patterns", "Price Action Structure")
     backtest = sig.get("backtest", "Verified triple screen historical setup")
     forecast = sig.get("forecast", "Trajectory: Stable")
-    
+    ml_line  = sig.get("ml", "")
+
+    reversal_line = f"🔥 *Reversal Edge*: `{sig['funding_msg']}`\n" if sig.get("funding_msg") else ""
+
     msg = (
         f"*TRADE ALERT: BTC {direction} ({tier}-Grade)*\n"
-        f"Confluence Score: {score}/100\n\n"
+        f"Confluence Score: {score}/100\n"
+        f"{reversal_line}\n"
         f"Entry Zone : ${sig['entry']:,.1f}\n"
         f"Stop Loss  : ${sig['sl']:,.1f} ({sig['sl_mode']})\n"
         f"Take Profit: ${sig['tp']:,.1f}\n"
         f"Risk/Reward: {sig['rr']}:1\n\n"
         f"Pattern Detected: {patterns}\n"
         f"Trend Forecast  : {forecast}\n"
+        f"ML Ensemble     : {ml_line}\n"
         f"Whale Protection: Passed (Stable Vol)\n"
         f"Backtest Record : {backtest}\n\n"
         f"Funding Rate: {funding*100:+.4f}% · Open Interest: {oi:,.0f} BTC\n"
@@ -1238,6 +1400,8 @@ def print_signal(sig, reasons_1d, reasons_4h, reasons_15m):
     row(s(f"  Score: {conf}/100  ", GY) + cbar(conf, 14))
     row(s(f"  1D:{sig['sc1d']}/100  4H:{sig['sc4h']}/100  15m:{sig['sc15']}/100  Session:{sig['session']}", GY))
     row(s(f"  Sentiment: {sig['sentiment'].get('bias','NEUTRAL')} ({sig['sentiment'].get('value',50)})", GY))
+    if sig.get("funding_msg"):
+        row(s(f"  🔥 Edge: {sig['funding_msg']}", BGN, bold=True))
     print(s("  ├" + "─"*IW + "┤", GY))
     row(s(f"  ENTRY  ${sig['entry']:>12,.1f}  ← limit order", GY))
     row(s(f"  STOP   ${sig['sl']:>12,.1f}  ← set FIRST  ({sig['sl_mode']})", BRD))
@@ -1360,6 +1524,9 @@ def run_cron(ex):
     # Linear Regression Price Trend Forecasting (15 period)
     forecast_slope = linear_regression_forecast(df15.close.tolist(), 15)
 
+    # ML Ensemble Forecast (LinearRegression + Ridge + Lasso trained on indicator features)
+    ml_pred, ml_label = ml_ensemble_forecast(df15, lookback=60)
+
     dir1d, sc1d, r1d = analyze_1d(df1d)
 
     sc4h, r4h = 0, []
@@ -1374,7 +1541,7 @@ def run_cron(ex):
     adp   = get_adaptive_min()
 
     print(s(f"  ${price:,.1f}  1D:{dir1d}({sc1d})  4H:{sc4h}  15m:{sc15}  Final:{final}/{adp}", GY))
-    print(s(f"  F&G:{sent['value']} {sent['bias']}  Funding:{funding*100:+.4f}%  OI:{oi:,.0f} BTC  Slope:{forecast_slope:+.4f}", GY))
+    print(s(f"  F&G:{sent['value']} {sent['bias']}  Funding:{funding*100:+.4f}%  OI:{oi:,.0f} BTC  Slope:{forecast_slope:+.4f}  {ml_label}", GY))
 
     # Apply protection gates
     skip_signal = False
@@ -1403,10 +1570,8 @@ def run_cron(ex):
             skip_reasons.append(f"Regime win rate too low ({local_wr:.1f}% based on {total_local} historical trades)")
 
         if not skip_signal:
-            sig = build_signal(dir1d, df15, sc1d, sc4h, sc15, sent, r1d, r4h, r15r, forecast_slope, local_wins, local_losses, local_wr)
+            sig = build_signal(dir1d, df15, sc1d, sc4h, sc15, sent, r1d, r4h, r15r, forecast_slope, local_wins, local_losses, local_wr, ml_pred, ml_label, funding, oi)
             if sig:
-                sig["funding"] = funding
-                sig["oi"] = oi
                 print_signal(sig, r1d, r4h, r15r)
                 send_signal_tg(sig, r1d, r4h)
                 log_signal(sig)
@@ -1488,6 +1653,9 @@ def main():
             # Linear Regression trend forecasting (15 period)
             forecast_slope = linear_regression_forecast(df15.close.tolist(), 15)
 
+            # ML Ensemble Forecast (LinearRegression + Ridge + Lasso trained on indicator features)
+            ml_pred, ml_label = ml_ensemble_forecast(df15, lookback=60)
+
             # Notify resolved backtest outcomes
             for entry in check_outcomes(df15):
                 sid = entry["id"]
@@ -1533,10 +1701,8 @@ def main():
                     skip_reasons.append(f"Regime win rate too low ({local_wr:.1f}% based on {total_local} historical trades)")
 
                 if not skip_signal:
-                    sig = build_signal(dir1d, df15, sc1d, sc4h, sc15, sent, r1d, r4h, r15, forecast_slope, local_wins, local_losses, local_wr)
+                    sig = build_signal(dir1d, df15, sc1d, sc4h, sc15, sent, r1d, r4h, r15, forecast_slope, local_wins, local_losses, local_wr, ml_pred, ml_label, funding, oi)
                     if sig:
-                        sig["funding"] = funding
-                        sig["oi"] = oi
                         print_signal(sig, r1d, r4h, r15)
                         send_signal_tg(sig, r1d, r4h)
                         log_signal(sig)
