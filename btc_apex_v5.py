@@ -48,16 +48,16 @@ _TG_CHAT_DEFAULT  = "998659643"
 TG_TOKEN  = os.getenv("TG_TOKEN", _TG_TOKEN_DEFAULT)
 TG_CHAT   = os.getenv("TG_CHAT",  _TG_CHAT_DEFAULT)
 
-# Signal thresholds — calibrated for real market conditions
-MIN_1D    = 45    # 1D must show clear direction (was 55)
-MIN_4H    = 38    # 4H must find a setup (was 50)
-MIN_15M   = 35    # 15m must have entry trigger (was 50)
-MIN_TOTAL = 55    # A tier — sent to Telegram (was 68)
-MIN_APLUS = 72    # A+ tier — strongest setups (was 80)
-MIN_RR    = 1.8   # minimum risk:reward (was 2.0)
+# Signal thresholds — calibrated for absolute elite precision (A+ Grade only)
+MIN_1D    = 55    # 1D must show absolute clear trend tide
+MIN_4H    = 50    # 4H must find deep setup wave
+MIN_15M   = 50    # 15m must have strong trigger ripple
+MIN_TOTAL = 72    # Only A-tier and above allowed
+MIN_APLUS = 80    # Strongest setups only
+MIN_RR    = 2.0   # Strict minimum 2:1 risk-to-reward ratio
 SL_ATR    = 1.2
 TP_ATR    = 2.8
-COOLDOWN  = 2     # candles between signals (was 3)
+COOLDOWN  = 4     # 4 candles between signals to prevent clustering
 
 # Backtesting
 SIGNAL_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "signals_log.json")
@@ -1158,41 +1158,12 @@ def send_signal_tg(sig, r1d, r4h):
 _last_hb = [0.0]
 
 def send_startup():
-    perf = get_performance()
-    pline = ""
-    if perf:
-        pline = f"\n📈 Bot performance (last {perf['n']} signals): WR `{perf['wr']}%` · PF `{perf['pf']}`"
-    adp   = get_adaptive_min()
-    aline = f"  Min score: `{adp}` (adaptive)" if adp != MIN_TOTAL else f"  Min score: `{MIN_TOTAL}`"
-    _tg(
-        f"🚀 *BTC APEX PRO v6.0 — ONLINE*\n"
-        f"⚙️ Exchange: `{EXCHANGE.upper()}` · Symbol: `{SYMBOL}`\n"
-        f"📊 Strategy: 1D→4H→15m Triple Screen Cascade\n"
-        f"🕐 `{datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}`\n"
-        f"{aline}{pline}\n"
-        f"_Interactive listener active. Friends can type /subscribe for signals!_"
-    )
+    """Startup broadcasts disabled to maintain absolute silence."""
+    pass
 
 def send_heartbeat():
-    now = time.time()
-    if now - _last_hb[0] < 7200:
-        return
-    _last_hb[0] = now
-    perf = get_performance()
-    adp  = get_adaptive_min()
-    pline = ""
-    if perf:
-        pline = (f"\n📈 Last {perf['n']} signals: "
-                 f"✅ {perf['wins']} TP · ❌ {perf['losses']} SL · "
-                 f"WR `{perf['wr']}%` · PF `{perf['pf']}`")
-    boost = f" (+{_adaptive_boost[0]} adaptive)" if _adaptive_boost[0] else ""
-    _tg(
-        f"💓 *BTC APEX PRO Heartbeat*\n"
-        f"✅ Bot alive · Min score: `{adp}`{boost}\n"
-        f"🕐 `{datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}`"
-        f"{pline}\n"
-        f"_Listening for Telegram commands. Signals broadcast automatically._"
-    )
+    """Periodic heartbeat broadcasts disabled to prevent Telegram cluster spam."""
+    pass
 
 def notify_outcome(sig_id, outcome, pnl):
     em = "✅ TP HIT" if outcome == "TP_HIT" else "❌ SL HIT"
