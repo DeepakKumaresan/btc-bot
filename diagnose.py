@@ -15,9 +15,9 @@ os.environ["TG_TOKEN"] = "8775276870:AAGABvQ6PwtRgGPNbk3V4YX_A0eVXxpiWyo"
 os.environ["TG_CHAT"]  = "998659643"
 
 from btc_apex_v5 import (
-    connect, fetch, ind, ichimoku, analyze_1d, analyze_4h, analyze_15m,
+    connect, fetch, ind, ichimoku, analyze_1d, analyze_4h, analyze_1h, analyze_15m,
     build_signal, get_sentiment, get_fib_levels, weinstein_stage, wyckoff_phase,
-    TF_15M, TF_1H, TF_4H, TF_1D, MIN_1D, MIN_4H, MIN_15M, MIN_TOTAL, MIN_APLUS,
+    TF_15M, TF_1H, TF_4H, TF_1D, MIN_1D, MIN_4H, MIN_1H, MIN_15M, MIN_TOTAL, MIN_APLUS,
     s, BGN, BRD, YL, GY, CY, WH, GN, MG, BD, RS, BCY
 )
 import requests
@@ -150,7 +150,20 @@ def main():
 
     # ── 8. SCREEN 1: 1D Analysis ──────────────────────────────────────
     sep("SCREEN 1 — 1D TIDE (Direction Filter)")
-    dir1d, sc1d_score, reasons1d = analyze_1d(df1d)
+    sc1d_long, reasons1d_long, sc1d_short, reasons1d_short = analyze_1d(df1d)
+    if sc1d_long >= sc1d_short and sc1d_long >= MIN_1D:
+        dir1d = "LONG"
+        sc1d_score = sc1d_long
+        reasons1d = reasons1d_long
+    elif sc1d_short > sc1d_long and sc1d_short >= MIN_1D:
+        dir1d = "SHORT"
+        sc1d_score = sc1d_short
+        reasons1d = reasons1d_short
+    else:
+        dir1d = "NEUTRAL"
+        sc1d_score = max(sc1d_long, sc1d_short)
+        reasons1d = reasons1d_long if sc1d_long >= sc1d_short else reasons1d_short
+
     d1c = BGN if dir1d=="LONG" else (BRD if dir1d=="SHORT" else YL)
     print(s(f"  Direction: {dir1d}", d1c, bold=True))
     print(f"  Score:     {bar(sc1d_score, MIN_1D)}")
@@ -180,10 +193,26 @@ def main():
         if not reasons4h:
             print(s("    (no specific setup triggers found)", YL))
 
+    # ── 9.5. SCREEN 2.5: 1H Analysis ──────────────────────────────────
+    sep("SCREEN 2.5 — 1H SETUP (Setup Finder)")
+    if dir1d == "NEUTRAL":
+        print(s("  Skipped — 1D is NEUTRAL", GY))
+        sc1h_score, reasons1h = 0, []
+    else:
+        sc1h_score, reasons1h = analyze_1h(df1h, dir1d)
+        print(f"  Direction being tested: {s(dir1d, d1c, bold=True)}")
+        print(f"  Score: {bar(sc1h_score, MIN_1H)}")
+        print()
+        print(s("  Reasons:", GY))
+        for r in reasons1h:
+            print(s(f"    ✅ {r}", GY))
+        if not reasons1h:
+            print(s("    (no specific setup triggers found)", YL))
+
     # ── 10. SCREEN 3: 15m Analysis ────────────────────────────────────
     sep("SCREEN 3 — 15m ENTRY (Entry Trigger)")
-    if dir1d == "NEUTRAL" or sc4h_score < MIN_4H:
-        msg = "Skipped — 1D NEUTRAL" if dir1d == "NEUTRAL" else f"Skipped — 4H score {sc4h_score} < {MIN_4H}"
+    if dir1d == "NEUTRAL" or sc4h_score < MIN_4H or sc1h_score < MIN_1H:
+        msg = "Skipped — 1D NEUTRAL" if dir1d == "NEUTRAL" else f"Skipped — 4H score {sc4h_score} < {MIN_4H} or 1H score {sc1h_score} < {MIN_1H}"
         print(s(f"  {msg}", GY))
         sc15_score, reasons15 = 0, []
     else:
@@ -198,21 +227,22 @@ def main():
 
     # ── 11. Final Score ───────────────────────────────────────────────
     sep("FINAL SIGNAL SCORE")
-    final = round(sc1d_score*0.30 + sc4h_score*0.35 + sc15_score*0.35)
-    print(f"  1D ({sc1d_score}) × 0.30 + 4H ({sc4h_score}) × 0.35 + 15m ({sc15_score}) × 0.35 = {s(str(final), WH, bold=True)}")
+    final = round(sc1d_score*0.20 + sc4h_score*0.25 + sc1h_score*0.25 + sc15_score*0.30)
+    print(f"  1D ({sc1d_score}) × 0.20 + 4H ({sc4h_score}) × 0.25 + 1H ({sc1h_score}) × 0.25 + 15m ({sc15_score}) × 0.30 = {s(str(final), WH, bold=True)}")
     print()
     print(f"  Total score: {bar(final, MIN_TOTAL, width=25)}")
     print()
 
-    if final >= MIN_APLUS and dir1d != "NEUTRAL" and sc4h_score >= MIN_4H and sc15_score >= MIN_15M:
+    if final >= MIN_APLUS and dir1d != "NEUTRAL" and sc4h_score >= MIN_4H and sc1h_score >= MIN_1H and sc15_score >= MIN_15M:
         print(s("  🏆 A+ SIGNAL WOULD FIRE!", BGN, bold=True))
-    elif final >= MIN_TOTAL and dir1d != "NEUTRAL" and sc4h_score >= MIN_4H and sc15_score >= MIN_15M:
+    elif final >= MIN_TOTAL and dir1d != "NEUTRAL" and sc4h_score >= MIN_4H and sc1h_score >= MIN_1H and sc15_score >= MIN_15M:
         print(s("  ⚡ A SIGNAL WOULD FIRE!", BGN, bold=True))
     else:
         print(s("  ❌ No signal this scan. Missing:", YL))
         if dir1d == "NEUTRAL": print(s("     • 1D direction unclear", YL))
         if sc1d_score < MIN_1D: print(s(f"     • 1D score {sc1d_score} < {MIN_1D} needed", YL))
         if sc4h_score < MIN_4H: print(s(f"     • 4H score {sc4h_score} < {MIN_4H} needed", YL))
+        if sc1h_score < MIN_1H: print(s(f"     • 1H score {sc1h_score} < {MIN_1H} needed", YL))
         if sc15_score < MIN_15M: print(s(f"     • 15m score {sc15_score} < {MIN_15M} needed", YL))
         if final < MIN_TOTAL: print(s(f"     • Final score {final} < {MIN_TOTAL} minimum", YL))
 
@@ -225,10 +255,11 @@ def main():
         f"*Screen Scores:*\n"
         f"{d1c_em} 1D Tide: `{sc1d_score}/100` (need {MIN_1D}) — {dir1d}\n"
         f"{'✅' if sc4h_score>=MIN_4H else '❌'} 4H Wave: `{sc4h_score}/100` (need {MIN_4H})\n"
+        f"{'✅' if sc1h_score>=MIN_1H else '❌'} 1H Wave: `{sc1h_score}/100` (need {MIN_1H})\n"
         f"{'✅' if sc15_score>=MIN_15M else '❌'} 15m Entry: `{sc15_score}/100` (need {MIN_15M})\n\n"
         f"*Final: `{final}/100` (need {MIN_TOTAL} for signal)*\n\n"
         f"😱 F&G: `{sent['value']} — {sent['bias']}`\n"
-        f"{'🚀 SIGNAL READY!' if final >= MIN_TOTAL and dir1d != 'NEUTRAL' and sc4h_score >= MIN_4H and sc15_score >= MIN_15M else '⏳ No signal yet — market not aligned'}"
+        f"{'🚀 SIGNAL READY!' if final >= MIN_TOTAL and dir1d != 'NEUTRAL' and sc4h_score >= MIN_4H and sc1h_score >= MIN_1H and sc15_score >= MIN_15M else '⏳ No signal yet — market not aligned'}"
     )
     ok2, _ = tg_test(status_msg)
     if ok2:

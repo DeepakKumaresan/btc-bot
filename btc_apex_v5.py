@@ -66,15 +66,16 @@ TG_TOKEN  = os.getenv("TG_TOKEN", _TG_TOKEN_DEFAULT)
 TG_CHAT   = os.getenv("TG_CHAT",  _TG_CHAT_DEFAULT)
 
 # Signal thresholds — calibrated for absolute elite precision (A+ Grade only)
-MIN_1D    = 55    # 1D must show absolute clear trend tide
-MIN_4H    = 50    # 4H must find deep setup wave
-MIN_15M   = 50    # 15m must have strong trigger ripple
-MIN_TOTAL = 80    # Strict A-plus gate (Confidence must be 80% to trigger)
-MIN_APLUS = 88    # God-predicted setups only
-MIN_RR    = 2.0   # Strict minimum 2:1 risk-to-reward ratio
+MIN_1D    = 40    # 1D must show clear trend tide
+MIN_4H    = 40    # 4H setup wave minimum
+MIN_1H    = 40    # 1H confirmation minimum
+MIN_15M   = 40    # 15m entry trigger minimum
+MIN_TOTAL = 70    # Telegram alert gate (70%+ = strong signal, 60-69% = Watchlist)
+MIN_APLUS = 85    # A+ Grade elite setups
+MIN_RR    = 1.8   # Minimum 1.8:1 risk-to-reward (relaxed from 2.0)
 SL_ATR    = 1.2
 TP_ATR    = 2.8
-COOLDOWN  = 4     # 4 candles between signals to prevent clustering
+COOLDOWN  = 2     # 2 candles between signals (was 4)
 
 # Backtesting
 SIGNAL_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "signals_log.json")
@@ -476,43 +477,42 @@ def analyze_1d(df1d):
     df1d = ichimoku(df1d)
     r, r5 = df1d.iloc[-2], df1d.iloc[-7]
     lp = sp = 0
-    reasons = []
+    reasons_long = []
+    reasons_short = []
 
-    if bool(r.above_cloud): lp += 20; reasons.append("1D above cloud")
-    elif bool(r.below_cloud): sp += 20; reasons.append("1D below cloud")
+    if bool(r.above_cloud): lp += 20; reasons_long.append("1D above cloud")
+    if bool(r.below_cloud): sp += 20; reasons_short.append("1D below cloud")
 
-    if r.ichi_tenkan > r.ichi_kijun: lp += 10; reasons.append("Tenkan>Kijun")
-    elif r.ichi_tenkan < r.ichi_kijun: sp += 10; reasons.append("Tenkan<Kijun")
+    if r.ichi_tenkan > r.ichi_kijun: lp += 10; reasons_long.append("Tenkan>Kijun")
+    if r.ichi_tenkan < r.ichi_kijun: sp += 10; reasons_short.append("Tenkan<Kijun")
 
     if len(df1d) > 28:
         p26 = float(df1d.close.iloc[-28])
-        if float(r.close) > p26: lp += 10; reasons.append("Chikou above price")
-        else: sp += 10; reasons.append("Chikou below price")
+        if float(r.close) > p26: lp += 10; reasons_long.append("Chikou above price")
+        else: sp += 10; reasons_short.append("Chikou below price")
 
     stage = weinstein_stage(df1d)
-    if stage == 2:   lp += 15; reasons.append("Weinstein Stage 2 (Markup)")
-    elif stage == 4: sp += 15; reasons.append("Weinstein Stage 4 (Markdown)")
+    if stage == 2:   lp += 15; reasons_long.append("Weinstein Stage 2 (Markup)")
+    if stage == 4:   sp += 15; reasons_short.append("Weinstein Stage 4 (Markdown)")
 
-    if r.e50 > r.e200: lp += 10; reasons.append("Golden Cross")
-    elif r.e50 < r.e200: sp += 10; reasons.append("Death Cross")
+    if r.e50 > r.e200: lp += 10; reasons_long.append("Golden Cross")
+    if r.e50 < r.e200: sp += 10; reasons_short.append("Death Cross")
 
     if r.adx > 20:
-        if r.adxp > r.adxn: lp += 10; reasons.append(f"ADX {r.adx:.0f} bull")
-        else: sp += 10; reasons.append(f"ADX {r.adx:.0f} bear")
+        if r.adxp > r.adxn: lp += 10; reasons_long.append(f"ADX {r.adx:.0f} bull")
+        else: sp += 10; reasons_short.append(f"ADX {r.adx:.0f} bear")
 
-    if r.obv_slope > 0: lp += 10; reasons.append("OBV rising")
-    elif r.obv_slope < 0: sp += 10; reasons.append("OBV falling")
+    if r.obv_slope > 0: lp += 10; reasons_long.append("OBV rising")
+    if r.obv_slope < 0: sp += 10; reasons_short.append("OBV falling")
 
-    if r.macdh > 0 and r.macdh > r.macdh1: lp += 10; reasons.append("MACD hist up")
-    elif r.macdh < 0 and r.macdh < r.macdh1: sp += 10; reasons.append("MACD hist dn")
+    if r.macdh > 0 and r.macdh > r.macdh1: lp += 10; reasons_long.append("MACD hist up")
+    if r.macdh < 0 and r.macdh < r.macdh1: sp += 10; reasons_short.append("MACD hist dn")
 
     if r.vol_r >= 1.0:
-        if lp >= sp: lp += 5
-        else: sp += 5
+        lp += 5
+        sp += 5
 
-    if lp > sp and lp >= MIN_1D:   return "LONG",  lp, reasons
-    if sp > lp and sp >= MIN_1D:   return "SHORT", sp, reasons
-    return "NEUTRAL", max(lp, sp), reasons
+    return lp, reasons_long, sp, reasons_short
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -530,6 +530,8 @@ def analyze_4h(df4h, direction):
     # Smart Money Zones & Divergence & BOS
     smc = get_smc_signals(df4h)
     bull_div, bear_div = detect_rsi_divergence(df4h)
+    stk_up = r.stk > r["std"] and rp.stk <= rp["std"] and r.stk < 50
+    stk_dn = r.stk < r["std"] and rp.stk >= rp["std"] and r.stk > 50
 
     # RSI Divergence (Very strong)
     if lng and bull_div: score += 20; reasons.append("4H Bull RSI Div")
@@ -560,21 +562,33 @@ def analyze_4h(df4h, direction):
     # Smarter RSI Zones
     rsi_val = r.rsi
     if lng:
-        if 35 <= rsi_val <= 55: score += 10; reasons.append(f"4H RSI {rsi_val:.0f} pullback")
-        elif 55 < rsi_val <= 70: score += 10; reasons.append(f"4H RSI {rsi_val:.0f} markup")
-        elif rsi_val < 35: score += 15; reasons.append(f"4H RSI {rsi_val:.0f} oversold")
+        if rsi_val < 35:
+            if bull_div:
+                score += 15; reasons.append("4H RSI OS + Div")
+        elif 35 <= rsi_val <= 55:
+            if r.macdh > r.macdh1 or stk_up:
+                score += 10; reasons.append(f"4H RSI {rsi_val:.0f} pullback turn")
+        elif 55 < rsi_val <= 70:
+            score += 10; reasons.append(f"4H RSI {rsi_val:.0f} markup")
+        elif rsi_val > 70:
+            score += 15; reasons.append(f"4H RSI Bull Momentum ({rsi_val:.0f})")
     else:
-        if 45 < rsi_val <= 65: score += 10; reasons.append(f"4H RSI {rsi_val:.0f} pullback")
-        elif 30 <= rsi_val <= 45: score += 10; reasons.append(f"4H RSI {rsi_val:.0f} markdown")
-        elif rsi_val > 65: score += 15; reasons.append(f"4H RSI {rsi_val:.0f} overbought")
+        if rsi_val > 65:
+            if bear_div:
+                score += 15; reasons.append("4H RSI OB + Div")
+        elif 45 < rsi_val <= 65:
+            if r.macdh < r.macdh1 or stk_dn:
+                score += 10; reasons.append(f"4H RSI {rsi_val:.0f} pullback turn")
+        elif 30 <= rsi_val <= 45:
+            score += 10; reasons.append(f"4H RSI {rsi_val:.0f} markdown")
+        elif rsi_val < 30:
+            score += 15; reasons.append(f"4H RSI Bear Momentum ({rsi_val:.0f})")
 
     # MACD Trend Direction
     if lng and r.macdh > r.macdh1:      score += 10; reasons.append("4H MACD turning up")
     if not lng and r.macdh < r.macdh1:  score += 10; reasons.append("4H MACD turning dn")
 
     # Stochastic RSI crosses
-    stk_up = r.stk > r["std"] and rp.stk <= rp["std"] and r.stk < 50
-    stk_dn = r.stk < r["std"] and rp.stk >= rp["std"] and r.stk > 50
     if lng and stk_up:      score += 10; reasons.append("4H Stoch cross up")
     if not lng and stk_dn:  score += 10; reasons.append("4H Stoch cross dn")
 
@@ -587,6 +601,184 @@ def analyze_4h(df4h, direction):
     if not lng and phase in ("DISTRIBUTION","MARKDOWN"): score += 5; reasons.append(f"Wyckoff {phase}")
 
     if r.atr_avg > 0 and 0.6 < r.atr/r.atr_avg < 1.8: score += 5; reasons.append("ATR normal")
+
+    # ── TREND CONTINUATION & BREAKOUT TRIGGERS (4H) ──
+    # 1. Bollinger Band Breakout
+    if "bb_up" in df4h.columns and "bb_lo" in df4h.columns:
+        bb_up = df4h.bb_up.iloc[-2]
+        bb_lo = df4h.bb_lo.iloc[-2]
+        if lng and price > bb_up and r.vol_r > 1.2:
+            score += 20; reasons.append("4H BB Upper Breakout + Vol")
+        elif not lng and price < bb_lo and r.vol_r > 1.2:
+            score += 20; reasons.append("4H BB Lower Breakout + Vol")
+
+    # 2. Consecutive Trend Candles
+    if len(df4h) >= 4:
+        last_3 = df4h.iloc[-4:-1]
+        if lng:
+            all_green = all(x.close > x.open for _, x in last_3.iterrows())
+            if all_green:
+                score += 10; reasons.append("4H 3 Green Candles")
+        else:
+            all_red = all(x.close < x.open for _, x in last_3.iterrows())
+            if all_red:
+                score += 10; reasons.append("4H 3 Red Candles")
+
+    # ── Trend Continuation & Momentum Alignment ──
+    e9_val = r.e9
+    e20_val = r.e20
+    e50_val = r.e50
+    e200_val = r.e200
+    if lng:
+        if e9_val > e20_val > e50_val > e200_val:
+            score += 15; reasons.append("4H Strong Bullish EMA stack")
+        if price > e9_val and price > e20_val:
+            score += 10; reasons.append("4H price above fast EMAs")
+        if r.adx > 22 and r.adxp > r.adxn:
+            score += 10; reasons.append("4H strong ADX bull momentum")
+    else:
+        if e9_val < e20_val < e50_val < e200_val:
+            score += 15; reasons.append("4H Strong Bearish EMA stack")
+        if price < e9_val and price < e20_val:
+            score += 10; reasons.append("4H price below fast EMAs")
+        if r.adx > 22 and r.adxn > r.adxp:
+            score += 10; reasons.append("4H strong ADX bear momentum")
+
+    return min(score, 100), reasons
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  SCREEN 2.5 — 1H SETUP  (Elder's Intermediate Wave Setup)
+# ══════════════════════════════════════════════════════════════════════
+
+def analyze_1h(df1h, direction):
+    """
+    Analyzes the 1-hour timeframe to confirm the wave direction before 15m ripple entry.
+    Fully aligned with 4H robust setup analysis.
+    """
+    df1h = ichimoku(df1h)
+    r, rp = df1h.iloc[-2], df1h.iloc[-3]
+    price = r.close
+    score = 0
+    reasons = []
+    lng = direction == "LONG"
+
+    # Smart Money Zones & Divergence & BOS
+    smc = get_smc_signals(df1h)
+    bull_div, bear_div = detect_rsi_divergence(df1h)
+    stk_up = r.stk > r["std"] and rp.stk <= rp["std"] and r.stk < 50
+    stk_dn = r.stk < r["std"] and rp.stk >= rp["std"] and r.stk > 50
+
+    # RSI Divergence (Very strong)
+    if lng and bull_div: score += 20; reasons.append("1H Bull RSI Div")
+    if not lng and bear_div: score += 20; reasons.append("1H Bear RSI Div")
+
+    # Swing Break of Structure (BOS)
+    if lng and smc["bos_bull"]: score += 15; reasons.append("1H Bull BOS")
+    if not lng and smc["bos_bear"]: score += 15; reasons.append("1H Bear BOS")
+
+    # Order Block test
+    if lng and smc["testing_bull_ob"]: score += 15; reasons.append("1H test Bull OB")
+    if not lng and smc["testing_bear_ob"]: score += 15; reasons.append("1H test Bear OB")
+
+    # FVG zone test
+    if lng and smc["testing_bull_fvg"]: score += 12; reasons.append("1H test Bull FVG")
+    if not lng and smc["testing_bear_fvg"]: score += 12; reasons.append("1H test Bear FVG")
+
+    # Fib Levels
+    fib = get_fib_levels(df1h)
+    at_fib, fn = near_fib(price, fib, pct=0.008)
+    if at_fib: score += 15; reasons.append(f"1H at Fib {fn}")
+
+    # Kijun / Cloud
+    if abs(price - r.ichi_kijun) / price < 0.008: score += 15; reasons.append("1H at Kijun")
+    elif lng and bool(r.above_cloud): score += 8; reasons.append("1H above cloud")
+    elif not lng and bool(r.below_cloud): score += 8; reasons.append("1H below cloud")
+
+    # Smarter RSI Zones
+    rsi_val = r.rsi
+    if lng:
+        if rsi_val < 35:
+            if bull_div:
+                score += 15; reasons.append("1H RSI OS + Div")
+        elif 35 <= rsi_val <= 55:
+            if r.macdh > r.macdh1 or stk_up:
+                score += 10; reasons.append(f"1H RSI {rsi_val:.0f} pullback turn")
+        elif 55 < rsi_val <= 70:
+            score += 10; reasons.append(f"1H RSI {rsi_val:.0f} markup")
+        elif rsi_val > 70:
+            score += 15; reasons.append(f"1H RSI Bull Momentum ({rsi_val:.0f})")
+    else:
+        if rsi_val > 65:
+            if bear_div:
+                score += 15; reasons.append("1H RSI OB + Div")
+        elif 45 < rsi_val <= 65:
+            if r.macdh < r.macdh1 or stk_dn:
+                score += 10; reasons.append(f"1H RSI {rsi_val:.0f} pullback turn")
+        elif 30 <= rsi_val <= 45:
+            score += 10; reasons.append(f"1H RSI {rsi_val:.0f} markdown")
+        elif rsi_val < 30:
+            score += 15; reasons.append(f"1H RSI Bear Momentum ({rsi_val:.0f})")
+
+    # MACD Trend Direction
+    if lng and r.macdh > r.macdh1:      score += 10; reasons.append("1H MACD turning up")
+    if not lng and r.macdh < r.macdh1:  score += 10; reasons.append("1H MACD turning dn")
+
+    # Stochastic RSI crosses
+    if lng and stk_up:      score += 10; reasons.append("1H Stoch cross up")
+    if not lng and stk_dn:  score += 10; reasons.append("1H Stoch cross dn")
+
+    # Pullback Volume Check
+    if df1h.vol_r.iloc[-4:-1].mean() < 0.9: score += 10; reasons.append("1H vol declining")
+
+    # Wyckoff
+    phase = wyckoff_phase(df1h)
+    if lng and phase in ("ACCUMULATION","MARKUP"):      score += 5; reasons.append(f"Wyckoff {phase}")
+    if not lng and phase in ("DISTRIBUTION","MARKDOWN"): score += 5; reasons.append(f"Wyckoff {phase}")
+
+    if r.atr_avg > 0 and 0.6 < r.atr/r.atr_avg < 1.8: score += 5; reasons.append("ATR normal")
+
+    # ── TREND CONTINUATION & BREAKOUT TRIGGERS (1H) ──
+    # 1. Bollinger Band Breakout
+    if "bb_up" in df1h.columns and "bb_lo" in df1h.columns:
+        bb_up = df1h.bb_up.iloc[-2]
+        bb_lo = df1h.bb_lo.iloc[-2]
+        if lng and price > bb_up and r.vol_r > 1.2:
+            score += 20; reasons.append("1H BB Upper Breakout + Vol")
+        elif not lng and price < bb_lo and r.vol_r > 1.2:
+            score += 20; reasons.append("1H BB Lower Breakout + Vol")
+
+    # 2. Consecutive Trend Candles
+    if len(df1h) >= 4:
+        last_3 = df1h.iloc[-4:-1]
+        if lng:
+            all_green = all(x.close > x.open for _, x in last_3.iterrows())
+            if all_green:
+                score += 10; reasons.append("1H 3 Green Candles")
+        else:
+            all_red = all(x.close < x.open for _, x in last_3.iterrows())
+            if all_red:
+                score += 10; reasons.append("1H 3 Red Candles")
+
+    # ── Trend Continuation & Momentum Alignment ──
+    e9_val = r.e9
+    e20_val = r.e20
+    e50_val = r.e50
+    e200_val = r.e200
+    if lng:
+        if e9_val > e20_val > e50_val > e200_val:
+            score += 15; reasons.append("1H Strong Bullish EMA stack")
+        if price > e9_val and price > e20_val:
+            score += 10; reasons.append("1H price above fast EMAs")
+        if r.adx > 22 and r.adxp > r.adxn:
+            score += 10; reasons.append("1H strong ADX bull momentum")
+    else:
+        if e9_val < e20_val < e50_val < e200_val:
+            score += 15; reasons.append("1H Strong Bearish EMA stack")
+        if price < e9_val and price < e20_val:
+            score += 10; reasons.append("1H price below fast EMAs")
+        if r.adx > 22 and r.adxn > r.adxp:
+            score += 10; reasons.append("1H strong ADX bear momentum")
 
     return min(score, 100), reasons
 
@@ -604,6 +796,8 @@ def analyze_15m(df15, direction):
     # SMC & Divergence
     smc = get_smc_signals(df15)
     bull_div, bear_div = detect_rsi_divergence(df15)
+    stk_up = r.stk > r["std"] and rp.stk <= rp["std"]
+    stk_dn = r.stk < r["std"] and rp.stk >= rp["std"]
 
     # RSI Divergence on 15m
     if lng and bull_div: score += 20; reasons.append("15m Bull RSI Div")
@@ -648,17 +842,31 @@ def analyze_15m(df15, direction):
     # Smarter RSI zones
     rsi_val = r.rsi
     if lng:
-        if rsi_val < 35: score += 15; reasons.append(f"15m RSI OS ({rsi_val:.0f})")
-        elif rsi_val < 50: score += 10; reasons.append(f"15m RSI low ({rsi_val:.0f})")
-        elif rsi_val < 70: score += 7; reasons.append(f"15m RSI strong ({rsi_val:.0f})")
+        if rsi_val < 35:
+            if bull_div or bool(r.hammer) or bool(r.bull_engulf):
+                score += 15; reasons.append("15m RSI OS + Confirmation")
+        elif 35 <= rsi_val < 50:
+            if r.macdh > 0 or stk_up:
+                score += 10; reasons.append("15m RSI low + Pullback turn")
+        elif 50 <= rsi_val <= 70:
+            score += 7; reasons.append(f"15m RSI strong ({rsi_val:.0f})")
+        elif rsi_val > 70:
+            # Trend continuation momentum (RSI Overbought but strong)
+            score += 15; reasons.append(f"15m RSI Bull Momentum ({rsi_val:.0f})")
     else:
-        if rsi_val > 65: score += 15; reasons.append(f"15m RSI OB ({rsi_val:.0f})")
-        elif rsi_val > 50: score += 10; reasons.append(f"15m RSI high ({rsi_val:.0f})")
-        elif rsi_val > 30: score += 7; reasons.append(f"15m RSI weak ({rsi_val:.0f})")
+        if rsi_val > 65:
+            if bear_div or bool(r.shoot_star) or bool(r.bear_engulf):
+                score += 15; reasons.append("15m RSI OB + Confirmation")
+        elif 50 < rsi_val <= 65:
+            if r.macdh < 0 or stk_dn:
+                score += 10; reasons.append("15m RSI high + Pullback turn")
+        elif 30 <= rsi_val <= 50:
+            score += 7; reasons.append(f"15m RSI weak ({rsi_val:.0f})")
+        elif rsi_val < 30:
+            # Trend continuation momentum (RSI Oversold but strong)
+            score += 15; reasons.append(f"15m RSI Bear Momentum ({rsi_val:.0f})")
 
     # Stochastic RSI
-    stk_up = r.stk > r["std"] and rp.stk <= rp["std"]
-    stk_dn = r.stk < r["std"] and rp.stk >= rp["std"]
     if lng and stk_up:     score += 10; reasons.append("15m Stoch up")
     if not lng and stk_dn: score += 10; reasons.append("15m Stoch dn")
 
@@ -666,8 +874,43 @@ def analyze_15m(df15, direction):
     if min(abs(p-r.vwap)/p, abs(p-r.e20)/p, abs(p-r.e50)/p) < 0.003:
         score += 10; reasons.append("15m at key level")
 
-    if lng and r.willr < -75:  score += 5; reasons.append(f"15m WillR {r.willr:.0f} OS")
-    if not lng and r.willr > -25: score += 5; reasons.append(f"15m WillR {r.willr:.0f} OB")
+    if lng and r.willr < -75:
+        if stk_up or r.macdh > 0:
+            score += 5; reasons.append("15m WillR OS + Turn")
+    if not lng and r.willr > -25:
+        if stk_dn or r.macdh < 0:
+            score += 5; reasons.append("15m WillR OB + Turn")
+
+    # ── TREND CONTINUATION & BREAKOUT TRIGGERS (15m) ──
+    # 1. Bollinger Band Breakout
+    if "bb_up" in df15.columns and "bb_lo" in df15.columns:
+        bb_up = df15.bb_up.iloc[-2]
+        bb_lo = df15.bb_lo.iloc[-2]
+        if lng and p > bb_up and r.vol_r > 1.3:
+            score += 25; reasons.append("15m BB Upper Breakout + Vol")
+        elif not lng and p < bb_lo and r.vol_r > 1.3:
+            score += 25; reasons.append("15m BB Lower Breakout + Vol")
+
+    # 2. Consecutive Momentum Candles
+    if len(df15) >= 4:
+        last_3 = df15.iloc[-4:-1]
+        if lng:
+            all_green = all(x.close > x.open for _, x in last_3.iterrows())
+            vol_expansion = df15.volume.iloc[-2] > df15.volume.iloc[-4]
+            if all_green and vol_expansion:
+                score += 15; reasons.append("15m 3 Green Candles + Vol expansion")
+        else:
+            all_red = all(x.close < x.open for _, x in last_3.iterrows())
+            vol_expansion = df15.volume.iloc[-2] > df15.volume.iloc[-4]
+            if all_red and vol_expansion:
+                score += 15; reasons.append("15m 3 Red Candles + Vol expansion")
+
+    # 3. ADX Momentum Support
+    if r.adx > 25 and r.adx > rp.adx:
+        if lng and r.adxp > r.adxn:
+            score += 15; reasons.append("15m Strong Bull ADX expansion")
+        elif not lng and r.adxn > r.adxp:
+            score += 15; reasons.append("15m Strong Bear ADX expansion")
 
     return min(score, 100), reasons
 
@@ -676,12 +919,13 @@ def analyze_15m(df15, direction):
 #  DYNAMIC HISTORICAL BACKTESTER
 # ══════════════════════════════════════════════════════════════════════
 
-def backtest_strategy_historically(df15, df4h, df1d, direction, lookback=300):
+def backtest_strategy_historically(df15, df1h, df4h, df1d, direction, lookback=150):
     """
-    Runs a zero-compromise local backtest of the Triple Screen Cascade
-    on historical candles in memory. Prevents lookahead bias.
+    Runs a fast local backtest of the Quadruple Screen Cascade on the last
+    150 candles of live exchange data. Prevents lookahead bias.
+    Uses 150 candles (was 300) for speed — still statistically sound.
     """
-    if len(df15) < lookback + 10 or len(df4h) < 50 or len(df1d) < 30:
+    if len(df15) < lookback + 10 or len(df1h) < 50 or len(df4h) < 50 or len(df1d) < 30:
         return 0, 0, 100.0
     
     wins = 0
@@ -695,17 +939,23 @@ def backtest_strategy_historically(df15, df4h, df1d, direction, lookback=300):
         # Slices with .copy() to completely isolate the dataframes
         hist_df1d = df1d[df1d.index <= t_ref].copy()
         hist_df4h = df4h[df4h.index <= t_ref].copy()
+        hist_df1h = df1h[df1h.index <= t_ref].copy()
         hist_df15 = df15.iloc[:i+1].copy()
         
-        if len(hist_df1d) < 10 or len(hist_df4h) < 10 or len(hist_df15) < 10:
+        if len(hist_df1d) < 10 or len(hist_df4h) < 10 or len(hist_df1h) < 10 or len(hist_df15) < 10:
             continue
             
-        h_dir1d, h_sc1d, _ = analyze_1d(hist_df1d)
-        if h_dir1d != direction or h_sc1d < MIN_1D:
+        h_lp, _, h_sp, _ = analyze_1d(hist_df1d)
+        h_sc1d = h_lp if direction == "LONG" else h_sp
+        if h_sc1d < MIN_1D:
             continue
             
         h_sc4h, _ = analyze_4h(hist_df4h, direction)
         if h_sc4h < MIN_4H:
+            continue
+
+        h_sc1h, _ = analyze_1h(hist_df1h, direction)
+        if h_sc1h < MIN_1H:
             continue
             
         h_sc15, _ = analyze_15m(hist_df15, direction)
@@ -767,7 +1017,7 @@ def backtest_strategy_historically(df15, df4h, df1d, direction, lookback=300):
 #  SIGNAL BUILDER
 # ══════════════════════════════════════════════════════════════════════
 
-def build_signal(direction, df15, sc1d, sc4h, sc15, sentiment, reasons_1d, reasons_4h, reasons_15m, forecast_slope, local_wins, local_losses, local_wr, ml_pred=0.0, ml_label="", funding=0.0, oi=0.0):
+def build_signal(direction, df15, sc1d, sc4h, sc1h, sc15, sentiment, reasons_1d, reasons_4h, reasons_1h, reasons_15m, forecast_slope, local_wins, local_losses, local_wr, ml_pred=0.0, ml_label="", funding=0.0, oi=0.0):
     r     = df15.iloc[-2]
     atr   = r.atr
     aavg  = r.atr_avg if r.atr_avg > 0 else atr
@@ -783,7 +1033,8 @@ def build_signal(direction, df15, sc1d, sc4h, sc15, sentiment, reasons_1d, reaso
     rr = round(abs(price-tp) / max(abs(price-sl), 0.01), 2)
     if rr < MIN_RR: return None
 
-    final = round(sc1d*0.30 + sc4h*0.35 + sc15*0.35)
+    # Quadruple timeframe blend: 1D:20%, 4H:25%, 1H:25%, 15m:30%
+    final = round(sc1d*0.20 + sc4h*0.25 + sc1h*0.25 + sc15*0.30)
     sent  = sentiment or {"mod": 0}
     if direction=="LONG"  and sent["mod"] >  0: final = min(100, final + sent["mod"])
     if direction=="SHORT" and sent["mod"] <  0: final = min(100, final + abs(sent["mod"]))
@@ -840,11 +1091,12 @@ def build_signal(direction, df15, sc1d, sc4h, sc15, sentiment, reasons_1d, reaso
         reasons_15m.append("Negative funding short chase penalty (-5)")
 
     adp = get_adaptive_min()
-    if final < adp: return None
+    # Silent if below watchlist threshold (60) - no Telegram at all
+    is_silent = final < 60
 
     # Identify clean patterns from reasons
     all_patterns = []
-    for reason in reasons_15m + reasons_4h + reasons_1d:
+    for reason in reasons_15m + reasons_1h + reasons_4h + reasons_1d:
         if "engulf" in reason.lower(): all_patterns.append("Engulfing")
         elif "hammer" in reason.lower(): all_patterns.append("Hammer")
         elif "star" in reason.lower(): all_patterns.append("Shooting Star")
@@ -871,9 +1123,9 @@ def build_signal(direction, df15, sc1d, sc4h, sc15, sentiment, reasons_1d, reaso
     return {
         "dir": direction, "entry": round(price, 1),
         "sl": sl, "tp": tp, "rr": rr, "conf": final,
-        "tier": "A+" if final >= MIN_APLUS else "A",
+        "tier": "A+" if final >= MIN_APLUS else ("A" if final >= MIN_TOTAL else "WATCH"),
         "sl_mode": sl_mode, "atr": round(atr, 1),
-        "sc1d": sc1d, "sc4h": sc4h, "sc15": sc15,
+        "sc1d": sc1d, "sc4h": sc4h, "sc1h": sc1h, "sc15": sc15,
         "session": sn, "sentiment": sent,
         "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "id": str(uuid.uuid4())[:8],
@@ -884,6 +1136,7 @@ def build_signal(direction, df15, sc1d, sc4h, sc15, sentiment, reasons_1d, reaso
         "funding": funding,
         "oi": oi,
         "funding_msg": funding_msg,
+        "silent": is_silent,
     }
 
 
@@ -1147,22 +1400,26 @@ def _tg_direct(chat_id, msg):
 def _run_scan_for_user(ex, chat_id):
     try:
         df15 = ind(fetch(ex, TF_15M))
-        df1d = ind(fetch(ex, TF_1D))
+        df1h = ind(fetch(ex, TF_1H))
         df4h = ind(fetch(ex, TF_4H))
+        df1d = ind(fetch(ex, TF_1D))
         
         price = float(df15.iloc[-1].close)
         dir1d, sc1d, _ = analyze_1d(df1d)
+        effective_dir = dir1d if dir1d != "NEUTRAL" else "LONG"
+        sc4h, _ = analyze_4h(df4h, effective_dir)
+        sc1h, _ = analyze_1h(df1h, effective_dir)
+        sc15, _ = analyze_15m(df15, effective_dir)
         
-        sc4h, _ = analyze_4h(df4h, dir1d) if dir1d != "NEUTRAL" else (0, [])
-        sc15, _ = analyze_15m(df15, dir1d) if dir1d != "NEUTRAL" and sc4h >= MIN_4H else (0, [])
-        
-        final = round(sc1d*0.30 + sc4h*0.35 + sc15*0.35)
+        # Quadruple timeframe blend: 1D:20%, 4H:25%, 1H:25%, 15m:30%
+        final = round(sc1d*0.20 + sc4h*0.25 + sc1h*0.25 + sc15*0.30)
         adp = get_adaptive_min()
         sent = get_sentiment()
         funding, oi = fetch_derivative_data(ex)
         
         d1_em = "🟢" if dir1d=="LONG" else ("🔴" if dir1d=="SHORT" else "⚪")
         c4_em = "✅" if sc4h >= MIN_4H else "⏳"
+        c1h_em = "✅" if sc1h >= MIN_1H else "⏳"
         c15_em = "✅" if sc15 >= MIN_15M else "⏳"
         
         report = (
@@ -1173,6 +1430,7 @@ def _run_scan_for_user(ex, chat_id):
             f"*Timeframe Analysis:*\n"
             f"{d1_em} 1D Trend Tide: `{sc1d}/100` — {dir1d}\n"
             f"{c4_em} 4H Wave Setup: `{sc4h}/100` (need {MIN_4H})\n"
+            f"{c1h_em} 1H Wave Setup: `{sc1h}/100` (need {MIN_1H})\n"
             f"{c15_em} 15m Entry Trigger: `{sc15}/100` (need {MIN_15M})\n"
             f"📊 Blended Confluence: `{final}/100` (need {adp})\n\n"
             f"_Trade with institutional edge._"
@@ -1284,35 +1542,60 @@ def _tg_listener_loop(ex):
 def _tg(msg):
     broadcast_tg_all(msg)
 
-def send_signal_tg(sig, r1d, r4h):
-    tier = sig["tier"]
-    direction = sig["dir"]
+def send_signal_tg(sig, r1d, r4h, r1h=None):
+    # Absolute Safeguard: Only send Telegram alerts for scores >= adaptive min
+    adp_gate = get_adaptive_min()
     score = sig["conf"]
+    direction = sig["dir"]
+    tier = sig["tier"]
     funding = sig.get("funding", 0.0)
     oi = sig.get("oi", 0.0)
     patterns = sig.get("patterns", "Price Action Structure")
-    backtest = sig.get("backtest", "Verified triple screen historical setup")
+    backtest = sig.get("backtest", "Verified quadruple screen setup")
     forecast = sig.get("forecast", "Trajectory: Stable")
     ml_line  = sig.get("ml", "")
 
+    # ── WATCHLIST ALERT (60-69%) — heads-up, setup forming ───────────
+    if 60 <= score < adp_gate:
+        reversal_line = f"\n🔥 *Reversal Edge*: `{sig['funding_msg']}`" if sig.get("funding_msg") else ""
+        watch_msg = (
+            f"👀 *WATCHLIST ALERT — BTC {direction}*{reversal_line}\n"
+            f"Confluence: `{score}/100` (building towards {adp_gate}%)\n\n"
+            f"📊 *Scores:* 1D:`{sig['sc1d']}` · 4H:`{sig['sc4h']}` · 1H:`{sig['sc1h']}` · 15m:`{sig['sc15']}`\n"
+            f"🎯 Entry Zone: `${sig['entry']:,.1f}`\n"
+            f"🛑 Stop Loss : `${sig['sl']:,.1f}`\n"
+            f"✅ Target   : `${sig['tp']:,.1f}` ({sig['rr']}R)\n"
+            f"📈 Pattern  : {patterns}\n"
+            f"🤖 ML Engine: {ml_line}\n\n"
+            f"_Setup is forming. Watch for 15m confirmation to trigger full signal._"
+        )
+        _tg(watch_msg)
+        print(s(f"  👀 WATCHLIST sent: {direction} conf={score}% (building)", YL, bold=True))
+        return
+
+    if score < 60:
+        print(s(f"  [SILENT] Conf {score}% — below watchlist threshold. Scanning silently.", GY))
+        return
+
     reversal_line = f"🔥 *Reversal Edge*: `{sig['funding_msg']}`\n" if sig.get("funding_msg") else ""
 
+    grade_em = "⚡" if tier == "A+" else "✅"
     msg = (
-        f"*TRADE ALERT: BTC {direction} ({tier}-Grade)*\n"
-        f"Confluence Score: {score}/100\n"
+        f"{grade_em} *TRADE SIGNAL — BTC {direction} ({tier}-Grade)*\n"
+        f"Confluence: `{score}/100`\n"
         f"{reversal_line}\n"
-        f"Entry Zone : ${sig['entry']:,.1f}\n"
-        f"Stop Loss  : ${sig['sl']:,.1f} ({sig['sl_mode']})\n"
-        f"Take Profit: ${sig['tp']:,.1f}\n"
-        f"Risk/Reward: {sig['rr']}:1\n\n"
-        f"Pattern Detected: {patterns}\n"
-        f"Trend Forecast  : {forecast}\n"
-        f"ML Ensemble     : {ml_line}\n"
-        f"Whale Protection: Passed (Stable Vol)\n"
-        f"Backtest Record : {backtest}\n\n"
-        f"Funding Rate: {funding*100:+.4f}% · Open Interest: {oi:,.0f} BTC\n"
-        f"Time: {sig['time']} UTC\n\n"
-        f"_Strict confluence signal. Execute with safe risk management._"
+        f"📊 *Scores:* 1D:`{sig['sc1d']}` · 4H:`{sig['sc4h']}` · 1H:`{sig['sc1h']}` · 15m:`{sig['sc15']}`\n\n"
+        f"🎯 Entry Zone : `${sig['entry']:,.1f}`\n"
+        f"🛑 Stop Loss  : `${sig['sl']:,.1f}` ({sig['sl_mode']})\n"
+        f"✅ Take Profit: `${sig['tp']:,.1f}`\n"
+        f"⚖️ Risk/Reward: `{sig['rr']}:1`\n\n"
+        f"📈 Pattern  : {patterns}\n"
+        f"🔮 Forecast : {forecast}\n"
+        f"🤖 ML Engine: {ml_line}\n"
+        f"📋 Backtest : {backtest}\n\n"
+        f"🏦 Funding: `{funding*100:+.4f}%` · OI: `{oi:,.0f} BTC`\n"
+        f"🕐 Time: `{sig['time']} UTC`\n\n"
+        f"_Execute with proper risk management. Never risk more than 1-2% per trade._"
     )
     _tg(msg)
     print(s(f"  ✅ Telegram sent: [{tier}] {direction} conf={score}%", BGN, bold=True))
@@ -1328,9 +1611,22 @@ def send_heartbeat():
     pass
 
 def notify_outcome(sig_id, outcome, pnl):
+    # Check if the signal was silent
+    log = _load_log()
+    is_silent = False
+    for sig in log:
+        if sig.get("id") == sig_id:
+            is_silent = sig.get("silent", False)
+            break
+
     em = "✅ TP HIT" if outcome == "TP_HIT" else "❌ SL HIT"
     color = "+" if pnl > 0 else ""
-    _tg(f"{em} — Signal `{sig_id}`\nP&L: `{color}{pnl:.2f}%`")
+    msg = f"{em} — Signal `{sig_id}`\nP&L: `{color}{pnl:.2f}%`"
+
+    if not is_silent:
+        _tg(msg)
+    else:
+        print(s(f"  [SILENT OUTCOME] {em} — Signal `{sig_id}` P&L: `{color}{pnl:.2f}%` (silent backtest outcome)", GY))
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1361,7 +1657,7 @@ def print_header():
     print(s("  ╚" + "═"*(W-4) + "╝", CY))
     print()
 
-def print_scan(price, dir1d, sc1d, sc4h, sc15, final, sent):
+def print_scan(price, dir1d, sc1d, sc4h, sc1h, sc15, final, sent):
     now   = datetime.now().strftime("%H:%M:%S")
     arrow = s("▲", BGN) if price > _lp[0] else (s("▼", BRD) if price < _lp[0] else s("─", GY))
     _lp[0] = price
@@ -1375,12 +1671,13 @@ def print_scan(price, dir1d, sc1d, sc4h, sc15, final, sent):
         f"{spark(price)}  "
         f"1D:{s(dir1d[:5].ljust(5), d1c, bold=True)} "
         f"4H:{s(str(sc4h).rjust(3), YL)} "
+        f"1H:{s(str(sc1h).rjust(3), YL)} "
         f"15m:{s(str(sc15).rjust(3), YL)} "
         f"→{s(str(final).rjust(3), fc, bold=True)}/{adp} "
         f"F&G:{s(str(sent.get('value',50)), MG)}"
     )
 
-def print_signal(sig, reasons_1d, reasons_4h, reasons_15m):
+def print_signal(sig, reasons_1d, reasons_4h, reasons_1h, reasons_15m):
     lng  = sig["dir"] == "LONG"
     gc   = BGN if lng else BRD
     ar   = "▲" if lng else "▼"
@@ -1394,11 +1691,11 @@ def print_signal(sig, reasons_1d, reasons_4h, reasons_15m):
     print()
     print(s("  ┌" + "─"*IW + "┐", gc))
     tier_c = BGN if sig["tier"] == "A+" else YL
-    print(s("  │", gc) + s(f" {ar} BTC {sig['dir']} — TRIPLE SCREEN CASCADE".ljust(IW-6), gc, bold=True) + s(f"[{sig['tier']}]", tier_c, bold=True) + s(" │", gc))
+    print(s("  │", gc) + s(f" {ar} BTC {sig['dir']} — QUADRUPLE SCREEN CASCADE".ljust(IW-6), gc, bold=True) + s(f"[{sig['tier']}]", tier_c, bold=True) + s(" │", gc))
     print(s("  ├" + "─"*IW + "┤", GY))
 
     row(s(f"  Score: {conf}/100  ", GY) + cbar(conf, 14))
-    row(s(f"  1D:{sig['sc1d']}/100  4H:{sig['sc4h']}/100  15m:{sig['sc15']}/100  Session:{sig['session']}", GY))
+    row(s(f"  1D:{sig['sc1d']}/100  4H:{sig['sc4h']}/100  1H:{sig['sc1h']}/100  15m:{sig['sc15']}/100  Session:{sig['session']}", GY))
     row(s(f"  Sentiment: {sig['sentiment'].get('bias','NEUTRAL')} ({sig['sentiment'].get('value',50)})", GY))
     if sig.get("funding_msg"):
         row(s(f"  🔥 Edge: {sig['funding_msg']}", BGN, bold=True))
@@ -1410,6 +1707,7 @@ def print_signal(sig, reasons_1d, reasons_4h, reasons_15m):
     print(s("  ├" + "─"*IW + "┤", GY))
     row(s(f"  1D reasons: {', '.join(reasons_1d[:3])}", CY))
     row(s(f"  4H reasons: {', '.join(reasons_4h[:3])}", CY))
+    row(s(f"  1H reasons: {', '.join(reasons_1h[:3])}", CY))
     row(s(f"  15m reason: {', '.join(reasons_15m[:3])}", CY))
     print(s("  ├" + "─"*IW + "┤", GY))
     row(s(f"  🔒 Anti-repaint · Confirmed candle · ID:{sig['id']}", YL))
@@ -1417,12 +1715,13 @@ def print_signal(sig, reasons_1d, reasons_4h, reasons_15m):
     print(s("  └" + "─"*IW + "┘", gc))
     print()
 
-def print_tracker(dir1d, sc1d, sc4h, sc15, adp):
+def print_tracker(dir1d, sc1d, sc4h, sc1h, sc15, adp):
     print()
     print(s(f"  ── Signal Tracker ──────────────────────────────────────────", GY))
     d1c = BGN if dir1d=="LONG" else (BRD if dir1d=="SHORT" else YL)
-    print(s(f"  1D Tide : ", GY) + s(dir1d, d1c, bold=True) + s(f"  score={sc1d}/100 (need≥{MIN_1D})", GY))
-    print(s(f"  4H Wave : score={sc4h}/100 (need≥{MIN_4H})", GY))
+    print(s(f"  1D Tide  : ", GY) + s(dir1d, d1c, bold=True) + s(f"  score={sc1d}/100 (need≥{MIN_1D})", GY))
+    print(s(f"  4H Wave  : score={sc4h}/100 (need≥{MIN_4H})", GY))
+    print(s(f"  1H Wave  : score={sc1h}/100 (need≥{MIN_1H})", GY))
     print(s(f"  15m Entry: score={sc15}/100 (need≥{MIN_15M})", GY))
     adp_boost = _adaptive_boost[0]
     boost_str = f" +{adp_boost} adaptive" if adp_boost else ""
@@ -1494,6 +1793,76 @@ def _start_server():
         print(s(f"  HTTP server error: {e}", GY))
 
 
+def is_signal_allowed(direction, df15, df1h, df4h, df1d, price):
+    # 1. Intraday Daily Candle Dump/Pump Protection
+    if len(df1d) > 0:
+        today_open = float(df1d.open.iloc[-1])
+        daily_pct_change = (price - today_open) / today_open
+        if direction == "LONG" and daily_pct_change < -0.015:
+            return False, f"Intraday Daily Crash Guard (down {daily_pct_change*100:.2f}%)"
+        if direction == "SHORT" and daily_pct_change > 0.015:
+            return False, f"Intraday Daily Pump Guard (up {daily_pct_change*100:.2f}%)"
+
+    # 2. EMA stack & Price Position relative to EMA50/200 Guards
+    r15 = df15.iloc[-2]
+    r1h = df1h.iloc[-2]
+    r4h = df4h.iloc[-2]
+    
+    if direction == "LONG":
+        # Key trend filter: 4H price must be above its 50 EMA (primary trend guard)
+        if r4h.close < r4h.e50:
+            return False, "4H price below 50 EMA — no uptrend on key timeframe"
+        # At least 2 of 3 timeframes must be above 200 EMA
+        above_200 = sum([r15.close > r15.e200, r1h.close > r1h.e200, r4h.close > r4h.e200])
+        if above_200 < 2:
+            return False, "Price below 200 EMA on majority of timeframes (Markdown Phase)"
+        # 4H fast EMA cross must be bullish
+        if r4h.e9 < r4h.e20:
+            return False, "4H EMAs Bearish cross (9 < 20) — no bullish momentum"
+    else:
+        # Key trend filter: 4H price must be below its 50 EMA (primary trend guard)
+        if r4h.close > r4h.e50:
+            return False, "4H price above 50 EMA — no downtrend on key timeframe"
+        # At least 2 of 3 timeframes must be below 200 EMA
+        below_200 = sum([r15.close < r15.e200, r1h.close < r1h.e200, r4h.close < r4h.e200])
+        if below_200 < 2:
+            return False, "Price above 200 EMA on majority of timeframes (Markup Phase)"
+        # 4H fast EMA cross must be bearish
+        if r4h.e9 > r4h.e20:
+            return False, "4H EMAs Bullish cross (9 > 20) — no bearish momentum"
+
+    # 3. No Catching Falling Knives / Shorting Rockets (15m Momentum and Candle guards)
+    if len(df15) >= 5:
+        last_3 = df15.iloc[-4:-1]
+        
+        # Detect if we have an active strong volume-supported breakout to bypass MACD direction check
+        is_breakout = False
+        if "bb_up" in df15.columns and "bb_lo" in df15.columns:
+            bb_up = df15.bb_up.iloc[-2]
+            bb_lo = df15.bb_lo.iloc[-2]
+            if direction == "LONG" and price > bb_up and r15.vol_r > 1.3:
+                is_breakout = True
+            elif direction == "SHORT" and price < bb_lo and r15.vol_r > 1.3:
+                is_breakout = True
+
+        if direction == "LONG":
+            all_red = all(x.close < x.open for _, x in last_3.iterrows())
+            strong_bodies = all(abs(x.close - x.open) > x.atr * 0.25 for _, x in last_3.iterrows())
+            if all_red and strong_bodies:
+                return False, "Extreme downward momentum (3 consecutive strong red candles)"
+            if not is_breakout and r15.macdh < 0 and r15.macdh < r15.macdh1:
+                return False, "15m MACD Histogram expanding downwards"
+        else:
+            all_green = all(x.close > x.open for _, x in last_3.iterrows())
+            strong_bodies = all(abs(x.close - x.open) > x.atr * 0.25 for _, x in last_3.iterrows())
+            if all_green and strong_bodies:
+                return False, "Extreme upward momentum (3 consecutive strong green candles)"
+            if not is_breakout and r15.macdh > 0 and r15.macdh > r15.macdh1:
+                return False, "15m MACD Histogram expanding upwards"
+
+    return True, ""
+
+
 # ══════════════════════════════════════════════════════════════════════
 #  CRON MODE — one scan, send signal if found, exit (GitHub Actions)
 # ══════════════════════════════════════════════════════════════════════
@@ -1527,20 +1896,77 @@ def run_cron(ex):
     # ML Ensemble Forecast (LinearRegression + Ridge + Lasso trained on indicator features)
     ml_pred, ml_label = ml_ensemble_forecast(df15, lookback=60)
 
-    dir1d, sc1d, r1d = analyze_1d(df1d)
+    # 1D Trend Analysis for both directions
+    sc1d_long, r1d_long, sc1d_short, r1d_short = analyze_1d(df1d)
 
-    sc4h, r4h = 0, []
-    if dir1d != "NEUTRAL":
-        sc4h, r4h = analyze_4h(df4h, dir1d)
+    # Evaluate LONG setup
+    sc4h_long, r4h_long = analyze_4h(df4h, "LONG")
+    sc1h_long, r1h_long = analyze_1h(df1h, "LONG")
+    sc15_long, r15_long = analyze_15m(df15, "LONG")
+    final_long = round(sc1d_long * 0.20 + sc4h_long * 0.25 + sc1h_long * 0.25 + sc15_long * 0.30)
 
-    sc15, r15r = 0, []
-    if dir1d != "NEUTRAL" and sc4h >= MIN_4H:
-        sc15, r15r = analyze_15m(df15, dir1d)
+    # Evaluate SHORT setup
+    sc4h_short, r4h_short = analyze_4h(df4h, "SHORT")
+    sc1h_short, r1h_short = analyze_1h(df1h, "SHORT")
+    sc15_short, r15_short = analyze_15m(df15, "SHORT")
+    final_short = round(sc1d_short * 0.20 + sc4h_short * 0.25 + sc1h_short * 0.25 + sc15_short * 0.30)
 
-    final = round(sc1d * 0.30 + sc4h * 0.35 + sc15 * 0.35)
-    adp   = get_adaptive_min()
+    adp = get_adaptive_min()
 
-    print(s(f"  ${price:,.1f}  1D:{dir1d}({sc1d})  4H:{sc4h}  15m:{sc15}  Final:{final}/{adp}", GY))
+    # Determine aligned directions:
+    long_tide_ok = sc1d_long >= MIN_1D
+    short_tide_ok = sc1d_short >= MIN_1D
+
+    # Strict timeframe gates ("No Compromise" rule)
+    long_aligned = long_tide_ok and sc4h_long >= MIN_4H and sc1h_long >= MIN_1H and sc15_long >= MIN_15M
+    short_aligned = short_tide_ok and sc4h_short >= MIN_4H and sc1h_short >= MIN_1H and sc15_short >= MIN_15M
+
+    # Select candidate direction
+    direction = "NEUTRAL"
+    sc1d, sc4h, sc1h, sc15, final = 0, 0, 0, 0, 0
+    r1d, r4h, r1h, r15r = [], [], [], []
+
+    if long_aligned and short_aligned:
+        if final_long >= final_short:
+            direction = "LONG"
+        else:
+            direction = "SHORT"
+    elif long_aligned:
+        direction = "LONG"
+    elif short_aligned:
+        direction = "SHORT"
+
+    if direction == "LONG":
+        sc1d, r1d = sc1d_long, r1d_long
+        sc4h, r4h = sc4h_long, r4h_long
+        sc1h, r1h = sc1h_long, r1h_long
+        sc15, r15r = sc15_long, r15_long
+        final = final_long
+    elif direction == "SHORT":
+        sc1d, r1d = sc1d_short, r1d_short
+        sc4h, r4h = sc4h_short, r4h_short
+        sc1h, r1h = sc1h_short, r1h_short
+        sc15, r15r = sc15_short, r15_short
+        final = final_short
+    else:
+        # For neutral display, print whichever has the higher final score
+        if final_long >= final_short:
+            direction = "NEUTRAL_LONG"
+            sc1d, r1d = sc1d_long, r1d_long
+            sc4h, r4h = sc4h_long, r4h_long
+            sc1h, r1h = sc1h_long, r1h_long
+            sc15, r15r = sc15_long, r15_long
+            final = final_long
+        else:
+            direction = "NEUTRAL_SHORT"
+            sc1d, r1d = sc1d_short, r1d_short
+            sc4h, r4h = sc4h_short, r4h_short
+            sc1h, r1h = sc1h_short, r1h_short
+            sc15, r15r = sc15_short, r15_short
+            final = final_short
+
+    # Print scan results to console
+    print(s(f"  ${price:,.1f}  1D:{direction}({sc1d})  4H:{sc4h}  1H:{sc1h}  15m:{sc15}  Final:{final}/{adp}", GY))
     print(s(f"  F&G:{sent['value']} {sent['bias']}  Funding:{funding*100:+.4f}%  OI:{oi:,.0f} BTC  Slope:{forecast_slope:+.4f}  {ml_label}", GY))
 
     # Apply protection gates
@@ -1550,30 +1976,39 @@ def run_cron(ex):
     if is_spike:
         skip_signal = True
         skip_reasons.append(f"Whale Volatility Protection ({spike_reason})")
-    if dir1d == "LONG" and forecast_slope < -5.0:
+    
+    # Intraday adverse momentum
+    if direction == "LONG" and forecast_slope < -5.0:
         skip_signal = True
         skip_reasons.append(f"Forecasting downward momentum ({forecast_slope:+.2f})")
-    if dir1d == "SHORT" and forecast_slope > 5.0:
+    if direction == "SHORT" and forecast_slope > 5.0:
         skip_signal = True
         skip_reasons.append(f"Forecasting upward momentum ({forecast_slope:+.2f})")
 
-    # ── Check if signal fires ─────────────────────────────────────────
+    # Run is_signal_allowed guards (Daily check, EMA checks, 3-consecutive candles, MACD histogram checks)
+    if direction in ("LONG", "SHORT"):
+        allowed, guard_reason = is_signal_allowed(direction, df15, df1h, df4h, df1d, price)
+        if not allowed:
+            skip_signal = True
+            skip_reasons.append(f"Guard Triggered: {guard_reason}")
+
+    # Check if signal fires
     signal_fired = False
     sig = None
 
-    if (dir1d != "NEUTRAL" and sc1d >= MIN_1D and sc4h >= MIN_4H and sc15 >= MIN_15M):
+    if direction in ("LONG", "SHORT") and final >= 60:
         # Run local in-memory backtest
-        local_wins, local_losses, local_wr = backtest_strategy_historically(df15, df4h, df1d, dir1d)
+        local_wins, local_losses, local_wr = backtest_strategy_historically(df15, df1h, df4h, df1d, direction)
         total_local = local_wins + local_losses
-        if total_local > 0 and local_wr < 80.0:
+        if total_local > 0 and local_wr < 45.0:
             skip_signal = True
             skip_reasons.append(f"Regime win rate too low ({local_wr:.1f}% based on {total_local} historical trades)")
 
         if not skip_signal:
-            sig = build_signal(dir1d, df15, sc1d, sc4h, sc15, sent, r1d, r4h, r15r, forecast_slope, local_wins, local_losses, local_wr, ml_pred, ml_label, funding, oi)
+            sig = build_signal(direction, df15, sc1d, sc4h, sc1h, sc15, sent, r1d, r4h, r1h, r15r, forecast_slope, local_wins, local_losses, local_wr, ml_pred, ml_label, funding, oi)
             if sig:
-                print_signal(sig, r1d, r4h, r15r)
-                send_signal_tg(sig, r1d, r4h)
+                print_signal(sig, r1d, r4h, r1h, r15r)
+                send_signal_tg(sig, r1d, r4h, r1h)
                 log_signal(sig)
                 print(s(f"  [CRON] ✅ SIGNAL FIRED: {sig['dir']} conf={sig['conf']}%", BGN, bold=True))
                 signal_fired = True
@@ -1582,16 +2017,18 @@ def run_cron(ex):
 
     if not signal_fired:
         missing = []
-        if dir1d == "NEUTRAL":      missing.append("1D: no clear direction yet")
-        elif sc1d < MIN_1D:         missing.append(f"1D: {sc1d}/{MIN_1D} (weak trend)")
-        if sc4h < MIN_4H:           missing.append(f"4H: {sc4h}/{MIN_4H} (no setup yet)")
-        if sc15 < MIN_15M:          missing.append(f"15m: {sc15}/{MIN_15M} (no entry trigger)")
-        if final < adp and not missing: missing.append(f"Score: {final}/{adp} (needs {adp})")
-        if sig is None and not missing: missing.append("R:R ratio too low for safe entry")
-        if skip_signal:             missing.append(f"Gate Protection: {', '.join(skip_reasons)}")
+        if direction.startswith("NEUTRAL"): missing.append("No strict confluence across all timeframes")
+        if sc1d < MIN_1D:      missing.append(f"1D: {sc1d}/{MIN_1D}")
+        if sc4h < MIN_4H:        missing.append(f"4H: {sc4h}/{MIN_4H}")
+        if sc1h < MIN_1H:        missing.append(f"1H: {sc1h}/{MIN_1H}")
+        if sc15 < MIN_15M:       missing.append(f"15m: {sc15}/{MIN_15M}")
+        if final < adp:          missing.append(f"Blend: {final}/{adp} (need {adp}% — gap {adp-final}pts)")
+        if sig is None and final >= adp and not missing: missing.append("R:R < 1.8 (invalid entry)")
+        if skip_signal:          missing.append(f"Gate: {', '.join(skip_reasons)}")
 
-        miss_str = ", ".join(missing) if missing else "Market not aligned"
-        print(s(f"  [CRON] No signal generated. Missing: {miss_str}", GY))
+        miss_str = " | ".join(missing) if missing else "Market conditions not fully aligned"
+        print(s(f"  [CRON] No signal. {miss_str}", GY))
+        print(s(f"  [CRON] Scores → 1D:{sc1d} 4H:{sc4h} 1H:{sc1h} 15m:{sc15} → Blend:{final}/{adp}", GY))
 
     return signal_fired
 
@@ -1665,22 +2102,79 @@ def main():
                     col = BGN if entry["outcome"] == "TP_HIT" else BRD
                     print(s(f"  Backtest: {sid} → {entry['outcome']} ({entry['pnl_pct']:+.2f}%)", col))
 
-            dir1d, sc1d, r1d = analyze_1d(df1d)
+            # 1D Trend Analysis for both directions
+            sc1d_long, r1d_long, sc1d_short, r1d_short = analyze_1d(df1d)
 
-            sc4h, r4h = 0, []
-            if dir1d != "NEUTRAL":
-                sc4h, r4h = analyze_4h(df4h, dir1d)
+            # Evaluate LONG setup
+            sc4h_long, r4h_long = analyze_4h(df4h, "LONG")
+            sc1h_long, r1h_long = analyze_1h(df1h, "LONG")
+            sc15_long, r15_long = analyze_15m(df15, "LONG")
+            final_long = round(sc1d_long * 0.20 + sc4h_long * 0.25 + sc1h_long * 0.25 + sc15_long * 0.30)
 
-            sc15, r15 = 0, []
-            if dir1d != "NEUTRAL" and sc4h >= MIN_4H:
-                sc15, r15 = analyze_15m(df15, dir1d)
+            # Evaluate SHORT setup
+            sc4h_short, r4h_short = analyze_4h(df4h, "SHORT")
+            sc1h_short, r1h_short = analyze_1h(df1h, "SHORT")
+            sc15_short, r15_short = analyze_15m(df15, "SHORT")
+            final_short = round(sc1d_short * 0.20 + sc4h_short * 0.25 + sc1h_short * 0.25 + sc15_short * 0.30)
 
-            final_disp = round(sc1d*0.30 + sc4h*0.35 + sc15*0.35)
-            print_scan(price, dir1d, sc1d, sc4h, sc15, final_disp, sent)
+            adp = get_adaptive_min()
+
+            # Determine aligned directions:
+            long_tide_ok = sc1d_long >= MIN_1D
+            short_tide_ok = sc1d_short >= MIN_1D
+
+            # Strict timeframe gates ("No Compromise" rule)
+            long_aligned = long_tide_ok and sc4h_long >= MIN_4H and sc1h_long >= MIN_1H and sc15_long >= MIN_15M
+            short_aligned = short_tide_ok and sc4h_short >= MIN_4H and sc1h_short >= MIN_1H and sc15_short >= MIN_15M
+
+            # Select candidate direction
+            direction = "NEUTRAL"
+            sc1d, sc4h, sc1h, sc15, final_disp = 0, 0, 0, 0, 0
+            r1d, r4h, r1h, r15r = [], [], [], []
+
+            if long_aligned and short_aligned:
+                if final_long >= final_short:
+                    direction = "LONG"
+                else:
+                    direction = "SHORT"
+            elif long_aligned:
+                direction = "LONG"
+            elif short_aligned:
+                direction = "SHORT"
+
+            if direction == "LONG":
+                sc1d, r1d = sc1d_long, r1d_long
+                sc4h, r4h = sc4h_long, r4h_long
+                sc1h, r1h = sc1h_long, r1h_long
+                sc15, r15r = sc15_long, r15_long
+                final_disp = final_long
+            elif direction == "SHORT":
+                sc1d, r1d = sc1d_short, r1d_short
+                sc4h, r4h = sc4h_short, r4h_short
+                sc1h, r1h = sc1h_short, r1h_short
+                sc15, r15r = sc15_short, r15_short
+                final_disp = final_short
+            else:
+                # For neutral display, print whichever has the higher final score
+                if final_long >= final_short:
+                    direction = "NEUTRAL_LONG"
+                    sc1d, r1d = sc1d_long, r1d_long
+                    sc4h, r4h = sc4h_long, r4h_long
+                    sc1h, r1h = sc1h_long, r1h_long
+                    sc15, r15r = sc15_long, r15_long
+                    final_disp = final_long
+                else:
+                    direction = "NEUTRAL_SHORT"
+                    sc1d, r1d = sc1d_short, r1d_short
+                    sc4h, r4h = sc4h_short, r4h_short
+                    sc1h, r1h = sc1h_short, r1h_short
+                    sc15, r15r = sc15_short, r15_short
+                    final_disp = final_short
+
+            print_scan(price, direction, sc1d, sc4h, sc1h, sc15, final_disp, sent)
 
             idx = len(df15)
-            if (dir1d != "NEUTRAL" and
-                sc1d >= MIN_1D and sc4h >= MIN_4H and sc15 >= MIN_15M and
+            if (direction in ("LONG", "SHORT") and final_disp >= 60 and
                 (idx - last_sig_candle) >= COOLDOWN):
 
                 # Apply protection gates
@@ -1689,29 +2183,40 @@ def main():
                 if is_spike:
                     skip_signal = True
                     skip_reasons.append("Whale Spike detected")
-                if (dir1d == "LONG" and forecast_slope < -5.0) or (dir1d == "SHORT" and forecast_slope > 5.0):
+                
+                # Intraday adverse momentum
+                if direction == "LONG" and forecast_slope < -5.0:
+                    skip_signal = True
+                    skip_reasons.append(f"Forecasting adverse momentum (Slope {forecast_slope:+.2f})")
+                if direction == "SHORT" and forecast_slope > 5.0:
                     skip_signal = True
                     skip_reasons.append(f"Forecasting adverse momentum (Slope {forecast_slope:+.2f})")
 
-                # Run local in-memory backtest
-                local_wins, local_losses, local_wr = backtest_strategy_historically(df15, df4h, df1d, dir1d)
+                # Run is_signal_allowed guards (Daily check, EMA checks, 3-consecutive candles, MACD histogram checks)
+                allowed, guard_reason = is_signal_allowed(direction, df15, df1h, df4h, df1d, price)
+                if not allowed:
+                    skip_signal = True
+                    skip_reasons.append(f"Guard Triggered: {guard_reason}")
+
+                # Run local in-memory backtest (150 candles, fast)
+                local_wins, local_losses, local_wr = backtest_strategy_historically(df15, df1h, df4h, df1d, direction)
                 total_local = local_wins + local_losses
-                if total_local > 0 and local_wr < 80.0:
+                if total_local > 0 and local_wr < 45.0:
                     skip_signal = True
                     skip_reasons.append(f"Regime win rate too low ({local_wr:.1f}% based on {total_local} historical trades)")
 
                 if not skip_signal:
-                    sig = build_signal(dir1d, df15, sc1d, sc4h, sc15, sent, r1d, r4h, r15, forecast_slope, local_wins, local_losses, local_wr, ml_pred, ml_label, funding, oi)
+                    sig = build_signal(direction, df15, sc1d, sc4h, sc1h, sc15, sent, r1d, r4h, r1h, r15r, forecast_slope, local_wins, local_losses, local_wr, ml_pred, ml_label, funding, oi)
                     if sig:
-                        print_signal(sig, r1d, r4h, r15)
-                        send_signal_tg(sig, r1d, r4h)
+                        print_signal(sig, r1d, r4h, r1h, r15r)
+                        send_signal_tg(sig, r1d, r4h, r1h)
                         log_signal(sig)
                         last_sig_candle = idx
                 else:
                     print(s(f"  ⚠️ Setup aligned but blocked by: {', '.join(skip_reasons)}", YL))
 
             if loop % 5 == 0:
-                print_tracker(dir1d, sc1d, sc4h, sc15, get_adaptive_min())
+                print_tracker(dir1d, sc1d, sc4h, sc1h, sc15, get_adaptive_min())
 
             send_heartbeat()
             loop += 1
