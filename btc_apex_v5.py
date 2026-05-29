@@ -1555,26 +1555,8 @@ def send_signal_tg(sig, r1d, r4h, r1h=None):
     forecast = sig.get("forecast", "Trajectory: Stable")
     ml_line  = sig.get("ml", "")
 
-    # ── WATCHLIST ALERT (60-69%) — heads-up, setup forming ───────────
-    if 60 <= score < adp_gate:
-        reversal_line = f"\n🔥 *Reversal Edge*: `{sig['funding_msg']}`" if sig.get("funding_msg") else ""
-        watch_msg = (
-            f"👀 *WATCHLIST ALERT — BTC {direction}*{reversal_line}\n"
-            f"Confluence: `{score}/100` (building towards {adp_gate}%)\n\n"
-            f"📊 *Scores:* 1D:`{sig['sc1d']}` · 4H:`{sig['sc4h']}` · 1H:`{sig['sc1h']}` · 15m:`{sig['sc15']}`\n"
-            f"🎯 Entry Zone: `${sig['entry']:,.1f}`\n"
-            f"🛑 Stop Loss : `${sig['sl']:,.1f}`\n"
-            f"✅ Target   : `${sig['tp']:,.1f}` ({sig['rr']}R)\n"
-            f"📈 Pattern  : {patterns}\n"
-            f"🤖 ML Engine: {ml_line}\n\n"
-            f"_Setup is forming. Watch for 15m confirmation to trigger full signal._"
-        )
-        _tg(watch_msg)
-        print(s(f"  👀 WATCHLIST sent: {direction} conf={score}% (building)", YL, bold=True))
-        return
-
-    if score < 60:
-        print(s(f"  [SILENT] Conf {score}% — below watchlist threshold. Scanning silently.", GY))
+    if score < adp_gate:
+        print(s(f"  [SILENT] Conf {score}% — below active adaptive gate ({adp_gate}%). Scanning silently.", GY))
         return
 
     reversal_line = f"🔥 *Reversal Edge*: `{sig['funding_msg']}`\n" if sig.get("funding_msg") else ""
