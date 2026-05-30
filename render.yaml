@@ -1,9 +1,12 @@
 services:
-  - type: web              # Web service — stays alive via cron-job.org pings
-    name: btc-apex-v5
+  - type: web
+    name: eth-apex-v5
     env: python
-    buildCommand: pip install ccxt pandas numpy ta requests
+    region: frankfurt          # EU Central — Binance NOT geoblocked here (avoids US IP ban)
+    plan: free
+    buildCommand: pip install ccxt pandas numpy ta requests scikit-learn
     startCommand: python -u btc_apex_v5.py
+    autoDeploy: true
     envVars:
       - key: TG_TOKEN
         value: 8775276870:AAGABvQ6PwtRgGPNbk3V4YX_A0eVXxpiWyo
