@@ -106,6 +106,7 @@ def connect():
     return getattr(ccxt, nm)({"enableRateLimit": True, "options": opts})
 
 def fetch(ex, tf, retries=3):
+    # Try the primary exchange first
     for attempt in range(retries):
         try:
             raw = ex.fetch_ohlcv(SYMBOL, tf, limit=LIMIT)
@@ -114,8 +115,31 @@ def fetch(ex, tf, retries=3):
             return df.set_index("ts").astype(float)
         except Exception as e:
             if attempt < retries - 1:
-                time.sleep(5 * (attempt + 1))
+                time.sleep(2 * (attempt + 1))
             else:
+                # If primary exchange fails, try fallback exchanges for public OHLCV data to ensure 24/7 uptime
+                print(s(f"  Primary exchange {ex.id} failed: {e}. Trying fallback exchanges...", YL))
+                fallbacks = ["bybit", "bitget", "gateio", "okx"]
+                for f_name in fallbacks:
+                    if f_name == ex.id:
+                        continue
+                    try:
+                        if f_name == "gateio":
+                            f_ex = ccxt.gateio()
+                        elif f_name == "okx":
+                            f_ex = ccxt.okx()
+                        elif f_name == "bybit":
+                            f_ex = ccxt.bybit({"options": {"defaultType": "linear"}})
+                        else:
+                            f_ex = ccxt.bitget({"options": {"defaultType": "swap"}})
+                        
+                        raw = f_ex.fetch_ohlcv(SYMBOL, tf, limit=LIMIT)
+                        df  = pd.DataFrame(raw, columns=["ts","open","high","low","close","volume"])
+                        df["ts"] = pd.to_datetime(df["ts"], unit="ms")
+                        print(s(f"  Fallback to {f_name} successful for {tf}!", BGN))
+                        return df.set_index("ts").astype(float)
+                    except Exception as fe:
+                        print(s(f"  Fallback to {f_name} failed: {fe}", GY))
                 raise
 
 # ── INDICATORS ────────────────────────────────────────────────────────
@@ -1154,6 +1178,20 @@ def _save_log(log):
         with open(SIGNAL_LOG, "w") as f: json.dump(log, f, indent=2)
     except: pass
 
+def is_duplicate_signal(direction, current_time_str):
+    log = _load_log()
+    if not log: return False
+    for sig in reversed(log[-5:]):
+        try:
+            sig_time = datetime.strptime(sig["time"], "%Y-%m-%d %H:%M:%S")
+            curr_time = datetime.strptime(current_time_str, "%Y-%m-%d %H:%M:%S")
+            # If same direction and within 4 candles (60 minutes)
+            if sig["direction"] == direction and (curr_time - sig_time).total_seconds() < 3600:
+                return True
+        except:
+            pass
+    return False
+
 def log_signal(sig, mode="TRIPLE_SCREEN"):
     log = _load_log()
     log.append({"id": sig["id"], "time": sig["time"], "direction": sig["dir"],
@@ -1726,6 +1764,7 @@ def print_tracker(dir1d, sc1d, sc4h, sc1h, sc15, adp):
 
 _ex_ref    = [None]   # shared exchange reference
 _last_scan = [0.0]    # last scan timestamp
+_last_error_alert = [0.0]  # last error alert timestamp
 _scan_lock = threading.Lock()
 
 def _do_scan_safe():
@@ -1982,9 +2021,10 @@ def run_cron(ex):
         # Run local in-memory backtest
         local_wins, local_losses, local_wr = backtest_strategy_historically(df15, df1h, df4h, df1d, direction)
         total_local = local_wins + local_losses
-        if total_local > 0 and local_wr < 45.0:
+        # Check for duplicate signal in signals_log.json
+        if is_duplicate_signal(direction, datetime.now().strftime("%Y-%m-%d %H:%M:%S")):
             skip_signal = True
-            skip_reasons.append(f"Regime win rate too low ({local_wr:.1f}% based on {total_local} historical trades)")
+            skip_reasons.append("Duplicate signal detected within cooldown period")
 
         if not skip_signal:
             sig = build_signal(direction, df15, sc1d, sc4h, sc1h, sc15, sent, r1d, r4h, r1h, r15r, forecast_slope, local_wins, local_losses, local_wr, ml_pred, ml_label, funding, oi)
@@ -2049,7 +2089,7 @@ def main():
     send_startup()
     print(s(f"  Mode: CONTINUOUS (scanning every 60s)\n", GY))
 
-    last_sig_candle = -COOLDOWN
+    last_sig_time = None
     loop = 1
     prev_outcomes = {}
 
@@ -2155,9 +2195,15 @@ def main():
 
             print_scan(price, direction, sc1d, sc4h, sc1h, sc15, final_disp, sent)
 
-            idx = len(df15)
-            if (direction in ("LONG", "SHORT") and final_disp >= 60 and
-                (idx - last_sig_candle) >= COOLDOWN):
+            current_candle_time = df15.index[-2]
+            cooldown_ok = True
+            if last_sig_time is not None:
+                # 15 min per candle, COOLDOWN = 2 (30 minutes)
+                minutes_elapsed = (current_candle_time - last_sig_time).total_seconds() / 60.0
+                if minutes_elapsed < (COOLDOWN * 15):
+                    cooldown_ok = False
+
+            if (direction in ("LONG", "SHORT") and final_disp >= 60 and cooldown_ok):
 
                 # Apply protection gates
                 skip_signal = False
@@ -2183,9 +2229,14 @@ def main():
                 # Run local in-memory backtest (150 candles, fast)
                 local_wins, local_losses, local_wr = backtest_strategy_historically(df15, df1h, df4h, df1d, direction)
                 total_local = local_wins + local_losses
-                if total_local > 0 and local_wr < 45.0:
+                if total_local > 0 and local_wr < 35.0:
                     skip_signal = True
-                    skip_reasons.append(f"Regime win rate too low ({local_wr:.1f}% based on {total_local} historical trades)")
+                    skip_reasons.append(f"Regime win rate critically low ({local_wr:.1f}% based on {total_local} historical trades)")
+
+                # Check for duplicate signal in signals_log.json
+                if is_duplicate_signal(direction, datetime.now().strftime("%Y-%m-%d %H:%M:%S")):
+                    skip_signal = True
+                    skip_reasons.append("Duplicate signal detected within cooldown period")
 
                 if not skip_signal:
                     sig = build_signal(direction, df15, sc1d, sc4h, sc1h, sc15, sent, r1d, r4h, r1h, r15r, forecast_slope, local_wins, local_losses, local_wr, ml_pred, ml_label, funding, oi)
@@ -2193,7 +2244,7 @@ def main():
                         print_signal(sig, r1d, r4h, r1h, r15r)
                         send_signal_tg(sig, r1d, r4h, r1h)
                         log_signal(sig)
-                        last_sig_candle = idx
+                        last_sig_time = current_candle_time
                 else:
                     print(s(f"  ⚠️ Setup aligned but blocked by: {', '.join(skip_reasons)}", YL))
 
@@ -2210,6 +2261,21 @@ def main():
             break
         except Exception as e:
             print(s(f"  Error: {e} — retrying in 15s", BRD))
+            # Send Telegram alert once every 2 hours to avoid spamming
+            _now = time.time()
+            if _now - _last_error_alert[0] > 7200:
+                _last_error_alert[0] = _now
+                err_msg = (
+                    f"⚠️ *BTC APEX Bot Connection Alert*\n\n"
+                    f"The bot is experiencing connection/geoblocking issues with the exchange.\n"
+                    f"❌ *Error details:* `{str(e)[:150]}`\n\n"
+                    f"💡 *Possible Solution:* If you deployed on Render free tier, your server might be located in the US where Binance/futures exchanges are geoblocked.\n"
+                    f"👉 Please redeploy your Render service and select the *Frankfurt, Germany (EU)* region to bypass geoblocking."
+                )
+                try:
+                    broadcast_tg_all(err_msg)
+                except:
+                    pass
             time.sleep(15)
             try:
                 ex = connect()
