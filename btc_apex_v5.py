@@ -55,7 +55,7 @@ except ImportError:
 
 # ── CONFIG ────────────────────────────────────────────────────────────
 EXCHANGE  = "binance"
-SYMBOL    = "BTC/USDT:USDT"
+SYMBOL    = "ETH/USDT:USDT"
 TF_15M, TF_1H, TF_4H, TF_1D = "15m", "1h", "4h", "1d"
 LIMIT     = 600
 
@@ -1461,10 +1461,10 @@ def _run_scan_for_user(ex, chat_id):
         c15_em = "✅" if sc15 >= MIN_15M else "⏳"
         
         report = (
-            f"📊 *BTC Real-time Market Scan Report*\n\n"
-            f"💰 Price: `${price:,.1f}`\n"
+            f"📊 *ETH Real-time Market Scan Report*\n\n"
+            f"💰 Price: `${price:,.2f}`\n"
             f"😱 F&G: `{sent['value']}/100 — {sent['bias']}`\n"
-            f"🏦 Funding: `{funding*100:+.4f}%` · OI: `{oi:,.0f} BTC`\n\n"
+            f"🏦 Funding: `{funding*100:+.4f}%` · OI: `{oi:,.0f} ETH`\n\n"
             f"*Timeframe Analysis:*\n"
             f"{d1_em} 1D Trend Tide: `{sc1d}/100` — {dir1d}\n"
             f"{c4_em} 4H Wave Setup: `{sc4h}/100` (need {MIN_4H})\n"
@@ -1525,9 +1525,9 @@ def _tg_listener_loop(ex):
                         subs.append(chat_id)
                         _save_subs(subs)
                     welcome_msg = (
-                        f"👋 *Welcome {username} to BTC APEX PRO v6.0!*\n\n"
+                        f"👋 *Welcome {username} to ETH APEX PRO v6.0!*\n\n"
                         f"🥇 You are now subscribed to the *world's #1 trading signals bot*.\n"
-                        f"📈 You will receive highly accurate, verified, A-grade BTC setups directly here.\n\n"
+                        f"📈 You will receive highly accurate, verified, A-grade ETH setups directly here.\n\n"
                         f"👉 *Available Commands:*\n"
                         f"  • `/scan` — Trigger instant real-time market scan\n"
                         f"  • `/stats` — View bot performance and win rate\n"
@@ -1547,7 +1547,7 @@ def _tg_listener_loop(ex):
                     if perf:
                         wrc = "🟢" if perf["wr"] >= 60 else ("🟡" if perf["wr"] >= 45 else "🔴")
                         stats_msg = (
-                            f"📈 *BTC APEX PRO — Performance Report*\n\n"
+                            f"📈 *ETH APEX PRO — Performance Report*\n\n"
                             f"📊 Trades logged: `{perf['n']}`\n"
                             f"🏆 Wins (TP hit): `{perf['wins']}`\n"
                             f"❌ Losses (SL hit): `{perf['losses']}`\n"
@@ -1560,12 +1560,12 @@ def _tg_listener_loop(ex):
                     _tg_direct(chat_id, stats_msg)
                     
                 elif text == "/scan":
-                    _tg_direct(chat_id, "🔍 *Scouting Bitcoin markets...* running real-time multi-timeframe analysis.")
+                    _tg_direct(chat_id, "🔍 *Scouting Ethereum markets...* running real-time multi-timeframe analysis.")
                     threading.Thread(target=_run_scan_for_user, args=(ex, chat_id), daemon=True).start()
                     
                 elif text == "/help":
                     help_msg = (
-                        f"🤖 *BTC APEX PRO v6.0 Help Menu*\n\n"
+                        f"🤖 *ETH APEX PRO v6.0 Help Menu*\n\n"
                         f"Available commands:\n"
                         f"⚡ `/scan` — Real-time multi-timeframe cascade analysis\n"
                         f"📈 `/stats` — Performance statistics and closed trade records\n"
@@ -1601,19 +1601,19 @@ def send_signal_tg(sig, r1d, r4h, r1h=None):
 
     grade_em = "⚡" if tier == "A+" else "✅"
     msg = (
-        f"{grade_em} *TRADE SIGNAL — BTC {direction} ({tier}-Grade)*\n"
+        f"{grade_em} *TRADE SIGNAL — ETH {direction} ({tier}-Grade)*\n"
         f"Confluence: `{score}/100`\n"
         f"{reversal_line}\n"
         f"📊 *Scores:* 1D:`{sig['sc1d']}` · 4H:`{sig['sc4h']}` · 1H:`{sig['sc1h']}` · 15m:`{sig['sc15']}`\n\n"
-        f"🎯 Entry Zone : `${sig['entry']:,.1f}`\n"
-        f"🛑 Stop Loss  : `${sig['sl']:,.1f}` ({sig['sl_mode']})\n"
-        f"✅ Take Profit: `${sig['tp']:,.1f}`\n"
+        f"🎯 Entry Zone : `${sig['entry']:,.2f}`\n"
+        f"🛑 Stop Loss  : `${sig['sl']:,.2f}` ({sig['sl_mode']})\n"
+        f"✅ Take Profit: `${sig['tp']:,.2f}`\n"
         f"⚖️ Risk/Reward: `{sig['rr']}:1`\n\n"
         f"📈 Pattern  : {patterns}\n"
         f"🔮 Forecast : {forecast}\n"
         f"🤖 ML Engine: {ml_line}\n"
         f"📋 Backtest : {backtest}\n\n"
-        f"🏦 Funding: `{funding*100:+.4f}%` · OI: `{oi:,.0f} BTC`\n"
+        f"🏦 Funding: `{funding*100:+.4f}%` · OI: `{oi:,.0f} ETH`\n"
         f"🕐 Time: `{sig['time']} UTC`\n\n"
         f"_Execute with proper risk management. Never risk more than 1-2% per trade._"
     )
@@ -1672,7 +1672,7 @@ def spark(p):
 def print_header():
     print()
     print(s("  ╔" + "═"*(W-4) + "╗", CY))
-    print(s("  ║", CY) + s(" BTC APEX v5.0 — PRO TRADER INTELLIGENCE".center(W-4), BCY, bold=True) + s("║", CY))
+    print(s("  ║", CY) + s(" ETH APEX v5.0 — PRO TRADER INTELLIGENCE".center(W-4), BCY, bold=True) + s("║", CY))
     print(s("  ║", CY) + s(" 1D→4H→15m · Ichimoku · Fibonacci · Wyckoff · ICT · Backtesting".center(W-4), GY) + s("║", CY))
     print(s("  ╚" + "═"*(W-4) + "╝", CY))
     print()
@@ -1711,7 +1711,7 @@ def print_signal(sig, reasons_1d, reasons_4h, reasons_1h, reasons_15m):
     print()
     print(s("  ┌" + "─"*IW + "┐", gc))
     tier_c = BGN if sig["tier"] == "A+" else YL
-    print(s("  │", gc) + s(f" {ar} BTC {sig['dir']} — QUADRUPLE SCREEN CASCADE".ljust(IW-6), gc, bold=True) + s(f"[{sig['tier']}]", tier_c, bold=True) + s(" │", gc))
+    print(s("  │", gc) + s(f" {ar} ETH {sig['dir']} — QUADRUPLE SCREEN CASCADE".ljust(IW-6), gc, bold=True) + s(f"[{sig['tier']}]", tier_c, bold=True) + s(" │", gc))
     print(s("  ├" + "─"*IW + "┤", GY))
 
     row(s(f"  Score: {conf}/100  ", GY) + cbar(conf, 14))
@@ -1987,8 +1987,8 @@ def run_cron(ex):
             final = final_short
 
     # Print scan results to console
-    print(s(f"  ${price:,.1f}  1D:{direction}({sc1d})  4H:{sc4h}  1H:{sc1h}  15m:{sc15}  Final:{final}/{adp}", GY))
-    print(s(f"  F&G:{sent['value']} {sent['bias']}  Funding:{funding*100:+.4f}%  OI:{oi:,.0f} BTC  Slope:{forecast_slope:+.4f}  {ml_label}", GY))
+    print(s(f"  ${price:,.2f}  1D:{direction}({sc1d})  4H:{sc4h}  1H:{sc1h}  15m:{sc15}  Final:{final}/{adp}", GY))
+    print(s(f"  F&G:{sent['value']} {sent['bias']}  Funding:{funding*100:+.4f}%  OI:{oi:,.0f} ETH  Slope:{forecast_slope:+.4f}  {ml_label}", GY))
 
     # Apply protection gates
     skip_signal = False
