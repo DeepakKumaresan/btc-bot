@@ -1,46 +1,31 @@
-name: BTC APEX Signal Bot — 24/7 Free
+name: BTC APEX Signal Bot — 24/7 Keep-Alive & Scan Trigger
 
 on:
   schedule:
-    - cron: "*/15 * * * *"   # Every 15 minutes, 24/7, 96 scans/day
+    - cron: "*/10 * * * *"   # Every 10 minutes, 24/7 (keeps Render from sleeping)
   workflow_dispatch:          # Manual trigger from GitHub UI
 
 jobs:
-  scan:
-    name: "BTC Signal Scan"
+  ping:
+    name: "Trigger Market Scan & Keep-Alive"
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 5
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Python 3.11
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Cache pip packages
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: pip-v2-${{ hashFiles('requirements.txt') }}
-          restore-keys: pip-v2-
-
-      - name: Install dependencies
+      - name: Send Ping to Frankfurt Render Bot
         run: |
-          pip install --upgrade pip
-          pip install ccxt pandas numpy ta requests
-
-      - name: Restore signal log from previous run
-        uses: actions/cache@v4
-        with:
-          path: signals_log.json
-          key: signals-log-${{ github.run_number }}
-          restore-keys: signals-log-
-
-      - name: Run BTC APEX scan
-        env:
-          TG_TOKEN: ${{ secrets.TG_TOKEN != '' && secrets.TG_TOKEN || '8775276870:AAGABvQ6PwtRgGPNbk3V4YX_A0eVXxpiWyo' }}
-          TG_CHAT:  ${{ secrets.TG_CHAT  != '' && secrets.TG_CHAT  || '998659643' }}
-        run: python -u btc_apex_v5.py --cron
+          echo "Sending scan trigger request to https://btc-signal-bot-v3.onrender.com/scan"
+          RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" https://btc-signal-bot-v3.onrender.com/scan)
+          
+          # Extract body and status
+          BODY=$(echo "$RESPONSE" | sed '/HTTP_STATUS/d')
+          STATUS=$(echo "$RESPONSE" | tr -d '\r' | grep 'HTTP_STATUS' | cut -d':' -f2)
+          
+          echo "Response Body: $BODY"
+          echo "HTTP Status: $STATUS"
+          
+          if [ "$STATUS" -ne 200 ]; then
+            echo "Error: Server returned status $STATUS"
+            exit 1
+          fi
+          echo "Scan successfully triggered!"
