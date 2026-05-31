@@ -1,8 +1,8 @@
 services:
   - type: web
-    name: eth-apex-v5
+    name: btc-apex-v5
     env: python
-    region: frankfurt          # EU Central — Binance NOT geoblocked here (avoids US IP ban)
+    region: frankfurt          # EU Central — Binance NOT geoblocked here
     plan: free
     buildCommand: pip install ccxt pandas numpy ta requests scikit-learn
     startCommand: python -u btc_apex_v5.py
