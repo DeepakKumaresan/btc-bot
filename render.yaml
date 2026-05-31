@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: btc-apex-v5
+    name: btc-signal-bot-v3
     env: python
     region: frankfurt          # EU Central — Binance NOT geoblocked here
     plan: free
