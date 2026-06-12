@@ -7,7 +7,7 @@ on:
 
 jobs:
   scan:
-    name: "ETH Signal Scan (Bybit — No Geoblock)"
+    name: "ETH Signal Scan (Bitget — A+ Grade Only)"
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -37,13 +37,13 @@ jobs:
           key: signals-log-${{ github.run_number }}
           restore-keys: signals-log-
 
-      - name: Run ETH APEX scan
+      - name: Run ETH APEX scan (A+ Grade only — Ultra Strict)
         env:
           TG_TOKEN: "8775276870:AAGABvQ6PwtRgGPNbk3V4YX_A0eVXxpiWyo"
           TG_CHAT: "998659643"
         run: python -u btc_apex_v5.py --cron
 
-      - name: Also ping Render to keep it alive (best effort)
+      - name: Keep Render alive (best effort)
         run: |
-          curl -s --max-time 10 https://btc-signal-bot-v3.onrender.com/ || echo "Render ping failed (ok, GH Actions scan already ran)"
+          curl -s --max-time 10 https://btc-signal-bot-v3.onrender.com/ || true
         continue-on-error: true

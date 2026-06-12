@@ -54,8 +54,8 @@ except ImportError:
     _SKLEARN_OK = True
 
 # ── CONFIG ────────────────────────────────────────────────────────────
-# Use bybit as primary — NOT geoblocked from US/GitHub Actions IPs unlike Binance
-EXCHANGE  = "bybit"
+# Bitget: works from US/GitHub IPs (no geoblock), ETH/USDT perpetual available
+EXCHANGE  = "bitget"
 SYMBOL    = "ETH/USDT:USDT"
 TF_15M, TF_1H, TF_4H, TF_1D = "15m", "1h", "4h", "1d"
 LIMIT     = 600
@@ -66,17 +66,21 @@ _TG_CHAT_DEFAULT  = "998659643"
 TG_TOKEN  = os.getenv("TG_TOKEN", _TG_TOKEN_DEFAULT)
 TG_CHAT   = os.getenv("TG_CHAT",  _TG_CHAT_DEFAULT)
 
-# Signal thresholds — calibrated for absolute elite precision (A+ Grade only)
-MIN_1D    = 40    # 1D must show clear trend tide
-MIN_4H    = 40    # 4H setup wave minimum
-MIN_1H    = 40    # 1H confirmation minimum
-MIN_15M   = 40    # 15m entry trigger minimum
-MIN_TOTAL = 70    # Telegram alert gate (70%+ = strong signal, 60-69% = Watchlist)
-MIN_APLUS = 85    # A+ Grade elite setups
-MIN_RR    = 1.8   # Minimum 1.8:1 risk-to-reward (relaxed from 2.0)
-SL_ATR    = 1.2
-TP_ATR    = 2.8
-COOLDOWN  = 2     # 2 candles between signals (was 4)
+# ─────────────────────────────────────────────────────────────────────
+# SIGNAL GATES — ULTRA STRICT (A+ Grade only)
+# These are the MINIMUM scores each timeframe must pass.
+# Raising these means fewer signals but only REAL, HIGH-CONVICTION setups.
+# ─────────────────────────────────────────────────────────────────────
+MIN_1D    = 55    # 1D must show a STRONG, clear macro trend tide
+MIN_4H    = 55    # 4H structure must be decisively in our direction
+MIN_1H    = 55    # 1H must confirm the wave — no weak confirmations
+MIN_15M   = 55    # 15m entry trigger — must be clean, high-momentum
+MIN_TOTAL = 80    # Final blended score gate — 80%+ means near-perfect confluence
+MIN_APLUS = 88    # A+ Grade elite setups — highest tier signals only
+MIN_RR    = 2.5   # Minimum 2.5:1 risk-to-reward — only high-value entries
+SL_ATR    = 1.0   # Tight stop loss multiplier (ATR-based)
+TP_ATR    = 3.0   # Wide take profit multiplier for strong R:R
+COOLDOWN  = 4     # 4 candles (1 hour) between signals to avoid overtrading
 
 # Backtesting
 SIGNAL_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "signals_log.json")
