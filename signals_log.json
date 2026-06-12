@@ -1,0 +1,16 @@
+[
+  {
+    "id": "5d5e0249",
+    "time": "2026-05-29 19:19:22",
+    "direction": "SHORT",
+    "mode": "TRIPLE_SCREEN",
+    "entry": 73235.1,
+    "sl": 73433.2,
+    "tp": 72772.9,
+    "rr": 2.33,
+    "conf": 86,
+    "tier": "A+",
+    "outcome": "PENDING",
+    "pnl_pct": 0
+  }
+]
