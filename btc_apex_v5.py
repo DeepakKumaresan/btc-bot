@@ -54,7 +54,8 @@ except ImportError:
     _SKLEARN_OK = True
 
 # ── CONFIG ────────────────────────────────────────────────────────────
-EXCHANGE  = "binance"
+# Use bybit as primary — NOT geoblocked from US/GitHub Actions IPs unlike Binance
+EXCHANGE  = "bybit"
 SYMBOL    = "ETH/USDT:USDT"
 TF_15M, TF_1H, TF_4H, TF_1D = "15m", "1h", "4h", "1d"
 LIMIT     = 600
@@ -98,12 +99,17 @@ def cbar(val, w=10):
 # ── EXCHANGE ──────────────────────────────────────────────────────────
 def connect():
     cfgs = {
-        "bitget":  ("bitget",      {"defaultType": "swap"}),
-        "binance": ("binanceusdm", {}),
-        "bybit":   ("bybit",       {"defaultType": "linear"}),
+        "bitget":  ("bitget",      {"options": {"defaultType": "swap"}}),
+        "binance": ("binanceusdm", {"options": {}}),
+        "bybit":   ("bybit",       {"options": {"defaultType": "linear"}}),
+        "gateio":  ("gateio",      {"options": {}}),
+        "okx":     ("okx",         {"options": {}}),
     }
-    nm, opts = cfgs[EXCHANGE.lower()]
-    return getattr(ccxt, nm)({"enableRateLimit": True, "options": opts})
+    exc_name = EXCHANGE.lower()
+    if exc_name not in cfgs:
+        exc_name = "bybit"  # safe default
+    lib_name, extra_opts = cfgs[exc_name]
+    return getattr(ccxt, lib_name)({"enableRateLimit": True, **extra_opts})
 
 def fetch(ex, tf, retries=3):
     # Try the primary exchange first

@@ -1,31 +1,49 @@
-name: BTC APEX Signal Bot — 24/7 Keep-Alive & Scan Trigger
+name: ETH APEX Signal Bot — 24/7 Scanner
 
 on:
   schedule:
-    - cron: "*/10 * * * *"   # Every 10 minutes, 24/7 (keeps Render from sleeping)
+    - cron: "*/15 * * * *"   # Every 15 minutes, 96 scans/day
   workflow_dispatch:          # Manual trigger from GitHub UI
 
 jobs:
-  ping:
-    name: "Trigger Market Scan & Keep-Alive"
+  scan:
+    name: "ETH Signal Scan (Bybit — No Geoblock)"
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
 
     steps:
-      - name: Send Ping to Frankfurt Render Bot
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-apex-v5-${{ hashFiles('requirements.txt') }}
+          restore-keys: pip-apex-v5-
+
+      - name: Install dependencies
+        run: pip install --upgrade pip ccxt pandas numpy ta requests scikit-learn
+
+      - name: Restore signal log (prevent duplicate signals)
+        uses: actions/cache@v4
+        with:
+          path: signals_log.json
+          key: signals-log-${{ github.run_number }}
+          restore-keys: signals-log-
+
+      - name: Run ETH APEX scan
+        env:
+          TG_TOKEN: "8775276870:AAGABvQ6PwtRgGPNbk3V4YX_A0eVXxpiWyo"
+          TG_CHAT: "998659643"
+        run: python -u btc_apex_v5.py --cron
+
+      - name: Also ping Render to keep it alive (best effort)
         run: |
-          echo "Sending scan trigger request to https://btc-signal-bot-v3.onrender.com/scan"
-          RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" https://btc-signal-bot-v3.onrender.com/scan)
-          
-          # Extract body and status
-          BODY=$(echo "$RESPONSE" | sed '/HTTP_STATUS/d')
-          STATUS=$(echo "$RESPONSE" | tr -d '\r' | grep 'HTTP_STATUS' | cut -d':' -f2)
-          
-          echo "Response Body: $BODY"
-          echo "HTTP Status: $STATUS"
-          
-          if [ "$STATUS" -ne 200 ]; then
-            echo "Error: Server returned status $STATUS"
-            exit 1
-          fi
-          echo "Scan successfully triggered!"
+          curl -s --max-time 10 https://btc-signal-bot-v3.onrender.com/ || echo "Render ping failed (ok, GH Actions scan already ran)"
+        continue-on-error: true
