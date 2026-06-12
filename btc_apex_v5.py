@@ -56,7 +56,20 @@ except ImportError:
 # ── CONFIG ────────────────────────────────────────────────────────────
 # Bitget: works from US/GitHub IPs (no geoblock), ETH/USDT perpetual available
 EXCHANGE  = "bitget"
-SYMBOL    = "ETH/USDT:USDT"
+SYMBOL    = "ETH/USDT:USDT"   # Primary coin
+
+# ── MULTI-COIN WATCHLIST ──────────────────────────────────────────────
+# These coins have LOW minimum order sizes on Binance Futures (< $5 notional)
+# Bot scans ALL of them and fires signal for the strongest A+ setup found.
+# Good for tiny accounts — ranked by minimum trade size (smallest first):
+WATCHLIST = [
+    "DOGE/USDT:USDT",   # Min ~$0.50 notional — ideal for micro accounts
+    "XRP/USDT:USDT",    # Min ~$0.50 notional
+    "ADA/USDT:USDT",    # Min ~$0.50 notional
+    "TRX/USDT:USDT",    # Min ~$0.50 notional
+    "SOL/USDT:USDT",    # Min ~$1.00 notional
+    "ETH/USDT:USDT",    # Min ~$1.00 notional
+]
 TF_15M, TF_1H, TF_4H, TF_1D = "15m", "1h", "4h", "1d"
 LIMIT     = 600
 
@@ -1901,10 +1914,125 @@ def is_signal_allowed(direction, df15, df1h, df4h, df1d, price):
 def run_cron(ex):
     """
     GitHub Actions scan — runs every 15 min.
-    ALWAYS sends Telegram so user knows bot is running.
-    Sends A-grade signals when all 3 screens and derivative gates align.
+    Scans ALL coins in WATCHLIST and fires signal for the strongest A+ setup found.
+    Ultra-strict gates: all 4 timeframes must score >= 55, blend >= 80, RR >= 2.5
     """
+    global SYMBOL
+
+    print(s(f"  [CRON] Starting multi-coin scan ({len(WATCHLIST)} coins)...", CY))
+
+    best_sig   = None
+    best_conf  = 0
+    best_coin  = None
+    best_r1d   = []
+    best_r4h   = []
+    best_r1h   = []
+
+    for coin in WATCHLIST:
+        SYMBOL = coin
+        coin_name = coin.split("/")[0]
+        try:
+            print(s(f"  [CRON] Scanning {coin_name}...", GY), end=" ", flush=True)
+
+            df15_c = ind(fetch(ex, TF_15M))
+            df1h_c = ind(fetch(ex, TF_1H))
+            df4h_c = ind(fetch(ex, TF_4H))
+            df1d_c = ind(fetch(ex, TF_1D))
+
+            price_c       = float(df15_c.iloc[-1].close)
+            sent_c        = get_sentiment()
+            funding_c, oi_c = fetch_derivative_data(ex)
+            slope_c       = linear_regression_forecast(df15_c.close.tolist(), 15)
+            ml_pred_c, ml_label_c = ml_ensemble_forecast(df15_c, lookback=60)
+            is_spike_c, spike_r_c = check_whale_spike(df15_c)
+
+            sc1d_long_c, r1d_long_c, sc1d_short_c, r1d_short_c = analyze_1d(df1d_c)
+            sc4h_long_c,  r4h_long_c  = analyze_4h(df4h_c,  "LONG")
+            sc1h_long_c,  r1h_long_c  = analyze_1h(df1h_c,  "LONG")
+            sc15_long_c,  r15_long_c  = analyze_15m(df15_c, "LONG")
+            final_long_c = round(sc1d_long_c*0.20 + sc4h_long_c*0.25 + sc1h_long_c*0.25 + sc15_long_c*0.30)
+
+            sc4h_short_c, r4h_short_c = analyze_4h(df4h_c,  "SHORT")
+            sc1h_short_c, r1h_short_c = analyze_1h(df1h_c,  "SHORT")
+            sc15_short_c, r15_short_c = analyze_15m(df15_c, "SHORT")
+            final_short_c = round(sc1d_short_c*0.20 + sc4h_short_c*0.25 + sc1h_short_c*0.25 + sc15_short_c*0.30)
+
+            # Pick direction
+            long_ok  = sc1d_long_c  >= MIN_1D and sc4h_long_c  >= MIN_4H and sc1h_long_c  >= MIN_1H and sc15_long_c  >= MIN_15M
+            short_ok = sc1d_short_c >= MIN_1D and sc4h_short_c >= MIN_4H and sc1h_short_c >= MIN_1H and sc15_short_c >= MIN_15M
+
+            if long_ok and final_long_c >= MIN_TOTAL:
+                direction_c = "LONG"
+                sc1d_c, r1d_c = sc1d_long_c, r1d_long_c
+                sc4h_c, r4h_c = sc4h_long_c, r4h_long_c
+                sc1h_c, r1h_c = sc1h_long_c, r1h_long_c
+                sc15_c, r15r_c = sc15_long_c, r15_long_c
+                final_c = final_long_c
+            elif short_ok and final_short_c >= MIN_TOTAL:
+                direction_c = "SHORT"
+                sc1d_c, r1d_c = sc1d_short_c, r1d_short_c
+                sc4h_c, r4h_c = sc4h_short_c, r4h_short_c
+                sc1h_c, r1h_c = sc1h_short_c, r1h_short_c
+                sc15_c, r15r_c = sc15_short_c, r15_short_c
+                final_c = final_short_c
+            else:
+                best_sc = max(final_long_c, final_short_c)
+                print(s(f"No setup (best={best_sc}/100, need {MIN_TOTAL})", GY))
+                continue
+
+            # Protection gates
+            skip = False
+            if is_spike_c:
+                print(s(f"Whale spike blocked", GY)); skip = True
+            if direction_c == "LONG" and slope_c < -5.0:
+                print(s(f"Adverse slope blocked", GY)); skip = True
+            if direction_c == "SHORT" and slope_c > 5.0:
+                print(s(f"Adverse slope blocked", GY)); skip = True
+
+            allowed_c, guard_r_c = is_signal_allowed(direction_c, df15_c, df1h_c, df4h_c, df1d_c, price_c)
+            if not allowed_c:
+                print(s(f"Guard: {guard_r_c}", GY)); skip = True
+
+            lw, ll, lwr = backtest_strategy_historically(df15_c, df1h_c, df4h_c, df1d_c, direction_c)
+            if (lw + ll) > 0 and lwr < 35.0:
+                print(s(f"Backtest WR too low ({lwr:.1f}%)", GY)); skip = True
+
+            if skip:
+                continue
+
+            sig_c = build_signal(direction_c, df15_c, sc1d_c, sc4h_c, sc1h_c, sc15_c, sent_c,
+                                  r1d_c, r4h_c, r1h_c, r15r_c, slope_c,
+                                  lw, ll, lwr, ml_pred_c, ml_label_c, funding_c, oi_c)
+            if sig_c and sig_c.get("conf", 0) > best_conf:
+                best_sig   = sig_c
+                best_conf  = sig_c["conf"]
+                best_coin  = coin_name
+                best_r1d   = r1d_c
+                best_r4h   = r4h_c
+                best_r1h   = r1h_c
+                print(s(f"A+ SIGNAL FOUND! {direction_c} conf={sig_c['conf']}% RR={sig_c['rr']}", BGN))
+            else:
+                print(s(f"Aligned but RR<2.5 or build failed", GY))
+
+        except Exception as e:
+            print(s(f"Error scanning {coin_name}: {e}", BRD))
+            SYMBOL = "ETH/USDT:USDT"  # reset on error
+            continue
+
+    # Restore default symbol
+    SYMBOL = "ETH/USDT:USDT"
+
+    if best_sig:
+        print(s(f"  [CRON] Best signal: {best_coin} {best_sig['dir']} conf={best_conf}%", BGN, bold=True))
+        send_signal_tg(best_sig, best_r1d, best_r4h, best_r1h)
+        log_signal(best_sig)
+        return True
+    else:
+        print(s(f"  [CRON] No A+ signal across all {len(WATCHLIST)} coins. Market protecting your capital.", GY))
+        return False
+
     print(s("  [CRON] Starting scan...", CY))
+
     df15 = ind(fetch(ex, TF_15M))
     df1h = ind(fetch(ex, TF_1H))
     df4h = ind(fetch(ex, TF_4H))
@@ -2259,7 +2387,9 @@ def main():
                     print(s(f"  ⚠️ Setup aligned but blocked by: {', '.join(skip_reasons)}", YL))
 
             if loop % 5 == 0:
-                print_tracker(dir1d, sc1d, sc4h, sc1h, sc15, get_adaptive_min())
+                # Use direction (already computed) instead of undefined dir1d
+                print_tracker(direction.replace("NEUTRAL_",""), sc1d, sc4h, sc1h, sc15, get_adaptive_min())
+
 
             send_heartbeat()
             loop += 1
