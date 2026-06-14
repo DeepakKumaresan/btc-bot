@@ -80,20 +80,20 @@ TG_TOKEN  = os.getenv("TG_TOKEN", _TG_TOKEN_DEFAULT)
 TG_CHAT   = os.getenv("TG_CHAT",  _TG_CHAT_DEFAULT)
 
 # ─────────────────────────────────────────────────────────────────────
-# SIGNAL GATES — ULTRA STRICT (A+ Grade only)
-# These are the MINIMUM scores each timeframe must pass.
-# Raising these means fewer signals but only REAL, HIGH-CONVICTION setups.
+# SIGNAL GATES — CALIBRATED (A-Grade, realistic for bear/sideways markets)
+# These prevent garbage signals while still allowing real setups to fire.
+# 80%+ was too strict — almost never triggers in current market conditions.
 # ─────────────────────────────────────────────────────────────────────
-MIN_1D    = 55    # 1D must show a STRONG, clear macro trend tide
-MIN_4H    = 55    # 4H structure must be decisively in our direction
-MIN_1H    = 55    # 1H must confirm the wave — no weak confirmations
-MIN_15M   = 55    # 15m entry trigger — must be clean, high-momentum
-MIN_TOTAL = 80    # Final blended score gate — 80%+ means near-perfect confluence
-MIN_APLUS = 88    # A+ Grade elite setups — highest tier signals only
-MIN_RR    = 2.5   # Minimum 2.5:1 risk-to-reward — only high-value entries
-SL_ATR    = 1.0   # Tight stop loss multiplier (ATR-based)
-TP_ATR    = 3.0   # Wide take profit multiplier for strong R:R
-COOLDOWN  = 4     # 4 candles (1 hour) between signals to avoid overtrading
+MIN_1D    = 45    # 1D must show a clear trend direction
+MIN_4H    = 45    # 4H structure must confirm
+MIN_1H    = 45    # 1H must agree
+MIN_15M   = 45    # 15m must provide clean entry
+MIN_TOTAL = 70    # Blended score gate — strong but achievable
+MIN_APLUS = 85    # A+ Grade elite tier
+MIN_RR    = 2.0   # Minimum 2:1 risk-to-reward
+SL_ATR    = 1.0   # ATR-based stop loss multiplier
+TP_ATR    = 2.5   # ATR-based take profit multiplier
+COOLDOWN  = 3     # 3 candles (45 min) between signals
 
 # Backtesting
 SIGNAL_LOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "signals_log.json")
@@ -1649,9 +1649,23 @@ def send_startup():
     """Startup broadcasts disabled to maintain absolute silence."""
     pass
 
+# Self-ping URL — the bot pings its own Render URL to prevent free tier sleep
+_SELF_URL = os.getenv("RENDER_EXTERNAL_URL", "https://btc-signal-bot-v3.onrender.com")
+
+def _self_ping_loop():
+    """Pings the bot's own URL every 10 minutes to prevent Render free tier sleep."""
+    while True:
+        try:
+            time.sleep(600)  # 10 minutes
+            requests.get(_SELF_URL + "/", timeout=10)
+            print(s("  [KEEPALIVE] Self-ping OK", GY))
+        except Exception:
+            pass  # Silent fail — not critical
+
 def send_heartbeat():
     """Periodic heartbeat broadcasts disabled to prevent Telegram cluster spam."""
     pass
+
 
 def notify_outcome(sig_id, outcome, pnl):
     # Check if the signal was silent
@@ -2220,7 +2234,10 @@ def main():
     # ── Continuous mode: laptop or Render background worker ──────────
     # Start keepalive HTTP server (UptimeRobot / Render compatibility)
     threading.Thread(target=_start_server, daemon=True).start()
-    
+
+    # Start self-ping loop — pings own URL every 10 min to prevent Render sleep
+    threading.Thread(target=_self_ping_loop, daemon=True).start()
+
     # Start Telegram background listener daemon
     threading.Thread(target=_tg_listener_loop, args=(ex,), daemon=True).start()
     
