@@ -1,13 +1,15 @@
 name: ETH APEX Signal Bot — 24/7 Scanner
 
 on:
+  push:
+    branches: [master]        # Triggers immediately on every push
   schedule:
     - cron: "*/15 * * * *"   # Every 15 minutes, 96 scans/day
   workflow_dispatch:          # Manual trigger from GitHub UI
 
 jobs:
   scan:
-    name: "ETH Signal Scan (Bitget — A+ Grade Only)"
+    name: "ETH Signal Scan (Bitget — Multi-Coin)"
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -37,13 +39,12 @@ jobs:
           key: signals-log-${{ github.run_number }}
           restore-keys: signals-log-
 
-      - name: Run ETH APEX scan (A+ Grade only — Ultra Strict)
+      - name: Run ETH APEX scan (6 coins — DOGE/XRP/ADA/TRX/SOL/ETH)
         env:
           TG_TOKEN: "8775276870:AAGABvQ6PwtRgGPNbk3V4YX_A0eVXxpiWyo"
           TG_CHAT: "998659643"
         run: python -u btc_apex_v5.py --cron
 
-      - name: Keep Render alive (best effort)
-        run: |
-          curl -s --max-time 10 https://btc-signal-bot-v3.onrender.com/ || true
+      - name: Keep Render alive
+        run: curl -s --max-time 10 https://btc-signal-bot-v3.onrender.com/ || true
         continue-on-error: true
