@@ -1169,12 +1169,13 @@ def build_signal(direction, df15, sc1d, sc4h, sc1h, sc15, sentiment, reasons_1d,
 
     return {
         "dir": direction, "entry": round(price, 1),
+        "symbol": SYMBOL,
         "sl": sl, "tp": tp, "rr": rr, "conf": final,
         "tier": "A+" if final >= MIN_APLUS else ("A" if final >= MIN_TOTAL else "WATCH"),
         "sl_mode": sl_mode, "atr": round(atr, 1),
         "sc1d": sc1d, "sc4h": sc4h, "sc1h": sc1h, "sc15": sc15,
         "session": sn, "sentiment": sent,
-        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
         "id": str(uuid.uuid4())[:8],
         "patterns": pattern_str,
         "backtest": backtest_str,
@@ -1201,14 +1202,15 @@ def _save_log(log):
         with open(SIGNAL_LOG, "w") as f: json.dump(log, f, indent=2)
     except: pass
 
-def is_duplicate_signal(direction, current_time_str):
+def is_duplicate_signal(symbol, direction, current_time_str):
     log = _load_log()
     if not log: return False
-    for sig in reversed(log[-5:]):
+    for sig in reversed(log[-10:]):
         try:
+            if sig.get("symbol", "ETH/USDT:USDT") != symbol:
+                continue
             sig_time = datetime.strptime(sig["time"], "%Y-%m-%d %H:%M:%S")
             curr_time = datetime.strptime(current_time_str, "%Y-%m-%d %H:%M:%S")
-            # If same direction and within 4 candles (60 minutes)
             if sig["direction"] == direction and (curr_time - sig_time).total_seconds() < 3600:
                 return True
         except:
@@ -1217,30 +1219,54 @@ def is_duplicate_signal(direction, current_time_str):
 
 def log_signal(sig, mode="TRIPLE_SCREEN"):
     log = _load_log()
-    log.append({"id": sig["id"], "time": sig["time"], "direction": sig["dir"],
+    log.append({"id": sig["id"], "time": sig["time"], "symbol": sig.get("symbol", SYMBOL), "direction": sig["dir"],
                  "mode": mode, "entry": sig["entry"], "sl": sig["sl"],
                  "tp": sig["tp"], "rr": sig["rr"], "conf": sig["conf"],
                  "tier": sig["tier"], "outcome": "PENDING", "pnl_pct": 0})
     _save_log(log)
 
-def check_outcomes(df15):
-    log    = _load_log()
-    hi_all = float(df15.high.max())
-    lo_all = float(df15.low.min())
+def check_outcomes(ex):
+    if ex is None:
+        return []
+    log = _load_log()
     updated = False
     for sig in log:
-        if sig["outcome"] != "PENDING": continue
-        if sig["direction"] == "LONG":
-            if hi_all >= sig["tp"]:
-                sig.update({"outcome":"TP_HIT","pnl_pct":round((sig["tp"]-sig["entry"])/sig["entry"]*100,2)}); updated=True
-            elif lo_all <= sig["sl"]:
-                sig.update({"outcome":"SL_HIT","pnl_pct":round((sig["sl"]-sig["entry"])/sig["entry"]*100,2)}); updated=True
-        else:
-            if lo_all <= sig["tp"]:
-                sig.update({"outcome":"TP_HIT","pnl_pct":round((sig["entry"]-sig["tp"])/sig["entry"]*100,2)}); updated=True
-            elif hi_all >= sig["sl"]:
-                sig.update({"outcome":"SL_HIT","pnl_pct":round((sig["entry"]-sig["sl"])/sig["entry"]*100,2)}); updated=True
-    if updated: _save_log(log)
+        if sig.get("outcome") != "PENDING":
+            continue
+        symbol = sig.get("symbol", "ETH/USDT:USDT")
+        try:
+            raw = ex.fetch_ohlcv(symbol, "15m", limit=150)
+            df = pd.DataFrame(raw, columns=["ts","open","high","low","close","volume"])
+            df["ts"] = pd.to_datetime(df["ts"], unit="ms")
+            df = df.set_index("ts").astype(float)
+            
+            sig_time = datetime.strptime(sig["time"], "%Y-%m-%d %H:%M:%S")
+            df_after = df[df.index >= sig_time]
+            if df_after.empty:
+                continue
+                
+            hi_all = float(df_after.high.max())
+            lo_all = float(df_after.low.min())
+            
+            if sig["direction"] == "LONG":
+                if hi_all >= sig["tp"]:
+                    sig.update({"outcome": "TP_HIT", "pnl_pct": round((sig["tp"] - sig["entry"]) / sig["entry"] * 100, 2)})
+                    updated = True
+                elif lo_all <= sig["sl"]:
+                    sig.update({"outcome": "SL_HIT", "pnl_pct": round((sig["sl"] - sig["entry"]) / sig["entry"] * 100, 2)})
+                    updated = True
+            else:
+                if lo_all <= sig["tp"]:
+                    sig.update({"outcome": "TP_HIT", "pnl_pct": round((sig["entry"] - sig["tp"]) / sig["entry"] * 100, 2)})
+                    updated = True
+                elif hi_all >= sig["sl"]:
+                    sig.update({"outcome": "SL_HIT", "pnl_pct": round((sig["entry"] - sig["sl"]) / sig["entry"] * 100, 2)})
+                    updated = True
+        except Exception as e:
+            print(f"  Error checking outcome for {symbol}: {e}")
+            
+    if updated:
+        _save_log(log)
     return log
 
 def get_performance():
@@ -1817,6 +1843,10 @@ def _do_scan_safe():
         if ex is None:
             return "exchange not ready"
         run_cron(ex)
+        try:
+            check_outcomes(ex)
+        except Exception as oe:
+            print(f"  Outcome check error in background thread: {oe}")
         return "scan complete"
     except Exception as e:
         return f"scan error: {e}"
@@ -2012,6 +2042,10 @@ def run_cron(ex):
                 print(s(f"Backtest WR too low ({lwr:.1f}%)", GY)); skip = True
 
             if skip:
+                continue
+
+            if is_duplicate_signal(coin, direction_c, datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")):
+                print(s(f"Duplicate signal blocked", GY))
                 continue
 
             sig_c = build_signal(direction_c, df15_c, sc1d_c, sc4h_c, sc1h_c, sc15_c, sent_c,
@@ -2242,175 +2276,28 @@ def main():
     threading.Thread(target=_tg_listener_loop, args=(ex,), daemon=True).start()
     
     send_startup()
-    print(s(f"  Mode: CONTINUOUS (scanning every 60s)\n", GY))
+    print(s(f"  Mode: CONTINUOUS (scanning all watchlist coins every 5 min)\n", GY))
 
-    last_sig_time = None
-    loop = 1
     prev_outcomes = {}
+    loop = 1
 
     while True:
         try:
-            df15 = ind(fetch(ex, TF_15M))
-            df1h = ind(fetch(ex, TF_1H))
-            df4h = ind(fetch(ex, TF_4H))
-            df1d = ind(fetch(ex, TF_1D))
-
-            price = float(df15.iloc[-1].close)
-            sent  = get_sentiment()
-
-            # Fetch derivative data streams
-            funding, oi = fetch_derivative_data(ex)
+            print(s(f"\n--- [CONTINUOUS] Starting watchlist scan {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} (Loop {loop}) ---", CY))
+            run_cron(ex)
             
-            # Whale Spike protection
-            is_spike, spike_reason = check_whale_spike(df15)
-
-            # Linear Regression trend forecasting (15 period)
-            forecast_slope = linear_regression_forecast(df15.close.tolist(), 15)
-
-            # ML Ensemble Forecast (LinearRegression + Ridge + Lasso trained on indicator features)
-            ml_pred, ml_label = ml_ensemble_forecast(df15, lookback=60)
-
-            # Notify resolved backtest outcomes
-            for entry in check_outcomes(df15):
+            # Check and notify outcomes
+            for entry in check_outcomes(ex):
                 sid = entry["id"]
                 if entry["outcome"] != "PENDING" and sid not in prev_outcomes:
                     prev_outcomes[sid] = entry["outcome"]
                     notify_outcome(sid, entry["outcome"], entry["pnl_pct"])
                     col = BGN if entry["outcome"] == "TP_HIT" else BRD
-                    print(s(f"  Backtest: {sid} → {entry['outcome']} ({entry['pnl_pct']:+.2f}%)", col))
-
-            # 1D Trend Analysis for both directions
-            sc1d_long, r1d_long, sc1d_short, r1d_short = analyze_1d(df1d)
-
-            # Evaluate LONG setup
-            sc4h_long, r4h_long = analyze_4h(df4h, "LONG")
-            sc1h_long, r1h_long = analyze_1h(df1h, "LONG")
-            sc15_long, r15_long = analyze_15m(df15, "LONG")
-            final_long = round(sc1d_long * 0.20 + sc4h_long * 0.25 + sc1h_long * 0.25 + sc15_long * 0.30)
-
-            # Evaluate SHORT setup
-            sc4h_short, r4h_short = analyze_4h(df4h, "SHORT")
-            sc1h_short, r1h_short = analyze_1h(df1h, "SHORT")
-            sc15_short, r15_short = analyze_15m(df15, "SHORT")
-            final_short = round(sc1d_short * 0.20 + sc4h_short * 0.25 + sc1h_short * 0.25 + sc15_short * 0.30)
-
-            adp = get_adaptive_min()
-
-            # Determine aligned directions:
-            long_tide_ok = sc1d_long >= MIN_1D
-            short_tide_ok = sc1d_short >= MIN_1D
-
-            # Strict timeframe gates ("No Compromise" rule)
-            long_aligned = long_tide_ok and sc4h_long >= MIN_4H and sc1h_long >= MIN_1H and sc15_long >= MIN_15M
-            short_aligned = short_tide_ok and sc4h_short >= MIN_4H and sc1h_short >= MIN_1H and sc15_short >= MIN_15M
-
-            # Select candidate direction
-            direction = "NEUTRAL"
-            sc1d, sc4h, sc1h, sc15, final_disp = 0, 0, 0, 0, 0
-            r1d, r4h, r1h, r15r = [], [], [], []
-
-            if long_aligned and short_aligned:
-                if final_long >= final_short:
-                    direction = "LONG"
-                else:
-                    direction = "SHORT"
-            elif long_aligned:
-                direction = "LONG"
-            elif short_aligned:
-                direction = "SHORT"
-
-            if direction == "LONG":
-                sc1d, r1d = sc1d_long, r1d_long
-                sc4h, r4h = sc4h_long, r4h_long
-                sc1h, r1h = sc1h_long, r1h_long
-                sc15, r15r = sc15_long, r15_long
-                final_disp = final_long
-            elif direction == "SHORT":
-                sc1d, r1d = sc1d_short, r1d_short
-                sc4h, r4h = sc4h_short, r4h_short
-                sc1h, r1h = sc1h_short, r1h_short
-                sc15, r15r = sc15_short, r15_short
-                final_disp = final_short
-            else:
-                # For neutral display, print whichever has the higher final score
-                if final_long >= final_short:
-                    direction = "NEUTRAL_LONG"
-                    sc1d, r1d = sc1d_long, r1d_long
-                    sc4h, r4h = sc4h_long, r4h_long
-                    sc1h, r1h = sc1h_long, r1h_long
-                    sc15, r15r = sc15_long, r15_long
-                    final_disp = final_long
-                else:
-                    direction = "NEUTRAL_SHORT"
-                    sc1d, r1d = sc1d_short, r1d_short
-                    sc4h, r4h = sc4h_short, r4h_short
-                    sc1h, r1h = sc1h_short, r1h_short
-                    sc15, r15r = sc15_short, r15_short
-                    final_disp = final_short
-
-            print_scan(price, direction, sc1d, sc4h, sc1h, sc15, final_disp, sent)
-
-            current_candle_time = df15.index[-2]
-            cooldown_ok = True
-            if last_sig_time is not None:
-                # 15 min per candle, COOLDOWN = 2 (30 minutes)
-                minutes_elapsed = (current_candle_time - last_sig_time).total_seconds() / 60.0
-                if minutes_elapsed < (COOLDOWN * 15):
-                    cooldown_ok = False
-
-            if (direction in ("LONG", "SHORT") and final_disp >= 60 and cooldown_ok):
-
-                # Apply protection gates
-                skip_signal = False
-                skip_reasons = []
-                if is_spike:
-                    skip_signal = True
-                    skip_reasons.append("Whale Spike detected")
-                
-                # Intraday adverse momentum
-                if direction == "LONG" and forecast_slope < -5.0:
-                    skip_signal = True
-                    skip_reasons.append(f"Forecasting adverse momentum (Slope {forecast_slope:+.2f})")
-                if direction == "SHORT" and forecast_slope > 5.0:
-                    skip_signal = True
-                    skip_reasons.append(f"Forecasting adverse momentum (Slope {forecast_slope:+.2f})")
-
-                # Run is_signal_allowed guards (Daily check, EMA checks, 3-consecutive candles, MACD histogram checks)
-                allowed, guard_reason = is_signal_allowed(direction, df15, df1h, df4h, df1d, price)
-                if not allowed:
-                    skip_signal = True
-                    skip_reasons.append(f"Guard Triggered: {guard_reason}")
-
-                # Run local in-memory backtest (150 candles, fast)
-                local_wins, local_losses, local_wr = backtest_strategy_historically(df15, df1h, df4h, df1d, direction)
-                total_local = local_wins + local_losses
-                if total_local > 0 and local_wr < 35.0:
-                    skip_signal = True
-                    skip_reasons.append(f"Regime win rate critically low ({local_wr:.1f}% based on {total_local} historical trades)")
-
-                # Check for duplicate signal in signals_log.json
-                if is_duplicate_signal(direction, datetime.now().strftime("%Y-%m-%d %H:%M:%S")):
-                    skip_signal = True
-                    skip_reasons.append("Duplicate signal detected within cooldown period")
-
-                if not skip_signal:
-                    sig = build_signal(direction, df15, sc1d, sc4h, sc1h, sc15, sent, r1d, r4h, r1h, r15r, forecast_slope, local_wins, local_losses, local_wr, ml_pred, ml_label, funding, oi)
-                    if sig:
-                        print_signal(sig, r1d, r4h, r1h, r15r)
-                        send_signal_tg(sig, r1d, r4h, r1h)
-                        log_signal(sig)
-                        last_sig_time = current_candle_time
-                else:
-                    print(s(f"  ⚠️ Setup aligned but blocked by: {', '.join(skip_reasons)}", YL))
-
-            if loop % 5 == 0:
-                # Use direction (already computed) instead of undefined dir1d
-                print_tracker(direction.replace("NEUTRAL_",""), sc1d, sc4h, sc1h, sc15, get_adaptive_min())
-
+                    print(s(f"  Outcome: {entry.get('symbol', 'ETH/USDT:USDT')} {sid} → {entry['outcome']} ({entry['pnl_pct']:+.2f}%)", col))
 
             send_heartbeat()
             loop += 1
-            time.sleep(60)
+            time.sleep(300)
 
         except KeyboardInterrupt:
             print()
